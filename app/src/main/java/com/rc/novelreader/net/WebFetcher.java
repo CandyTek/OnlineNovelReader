@@ -157,9 +157,22 @@ public final class WebFetcher {
             + "}catch(err){}return location.href;})()";
 
     /**
-     * Readers that have no "next" link continue when the reader reaches the bottom: the next chapter is appended
-     * and the address bar moves on to it. This scrolls the page that is loaded right now to its end until the
-     * address changes, and returns the new address (same site only), or null when nothing happens.
+     * Presses the page's own "next chapter" control when it carries no address (a script decides where to go).
+     * Returns 'y' when something was pressed. Among several candidates a visible one wins, then a link.
+     */
+    private static final String CLICK_JS = "(function(){try{"
+            + "var re=/^(?:\\u52a0\\u8f7d|\\u9605\\u8bfb|\\u7ee7\\u7eed)?\\u4e0b\\u4e00?[\\u7ae0\\u8282\\u7bc7\\u8bdd\\u56de\\u9875]$|^next(?: ?chapter)?$/i;"
+            + "var els=document.querySelectorAll('a,button,[data-type],[onclick],li,span,div'),pick=null,pv=false;"
+            + "for(var i=0;i<els.length;i++){var x=els[i];if(x.children.length>2)continue;"
+            + "var t=(x.textContent||'').replace(/[^\\w\\u4e00-\\u9fff ]/g,'').trim();if(t.length>12||!re.test(t))continue;"
+            + "var v=x.offsetParent!==null;if(!pick||(v&&!pv)||(v==pv&&x.tagName=='A'&&pick.tagName!='A')){pick=x;pv=v;}}"
+            + "if(pick){pick.click();return 'y';}}catch(err){}return 'n';})()";
+
+    /**
+     * Finds the next chapter of a page that has no usable "next" link, on the page that is loaded right now:
+     * first by pressing its own next control (the address is computed by a script), then by scrolling to the end
+     * (readers that append the next chapter when the reader reaches the bottom and move the address bar on).
+     * Returns the address the page moves to (same site only), or null when nothing happens.
      */
     private static String scrollForNext(final String startUrl) {
         final String[] found = new String[1];
@@ -167,9 +180,18 @@ public final class WebFetcher {
         final long deadline = SystemClock.uptimeMillis() + 9000;
         final String startKey = Urls.normalize(startUrl);
         final Runnable[] step = new Runnable[1];
+        // 0 = press the next control first; afterwards the time until which only the address is watched
+        final long[] clickWait = {0};
         step[0] = () -> {
             if (web == null || done.getCount() == 0) return;
-            web.evaluateJavascript(SCROLL_JS, v -> {
+            if (clickWait[0] == 0) {
+                web.evaluateJavascript(CLICK_JS, v -> {
+                    clickWait[0] = "y".equals(decodeJs(v)) ? SystemClock.uptimeMillis() + 3500 : 1;
+                    App.MAIN.postDelayed(step[0], clickWait[0] == 1 ? 0 : 300);
+                });
+                return;
+            }
+            web.evaluateJavascript(SystemClock.uptimeMillis() < clickWait[0] ? "location.href" : SCROLL_JS, v -> {
                 String now = decodeJs(v);
                 if (now.startsWith("http") && Urls.sameSite(now, startUrl) && !Urls.normalize(now).equals(startKey)) {
                     found[0] = now;

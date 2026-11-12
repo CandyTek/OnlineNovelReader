@@ -358,6 +358,17 @@ public class SnifferTest {
         assertEquals("\u957f\u5b89\u884c", r.chapter.bookTitle);
     }
 
+    /** "Load next chapter" style labels (a verb in front of the usual words) are next links too. */
+    @Test
+    public void nextLinkWithVerbPrefix() {
+        String page = "<html><head><title>\u7b2c12\u7ae0 \u591c\u96e8_\u957f\u5b89\u884c_\u67d0\u67d0\u4e66\u5c4b</title></head><body><h3>\u7b2c12\u7ae0 \u591c\u96e8</h3>"
+                + "<div class='chapter-content'>" + paras(8, "", "<p>", "</p>") + "</div>"
+                + "<div><a href='/chapter/77/3019' class='btn'>\u52a0\u8f7d\u4e0b\u4e00\u7ae0 \u2b07</a></div></body></html>";
+        PageResult r = sniffer.analyze("http://m.fake-shuwu.com/chapter/77/3012", page);
+        assertEquals(PageResult.Type.CHAPTER, r.type);
+        assertEquals("http://m.fake-shuwu.com/chapter/77/3019", r.chapter.nextUrl);
+    }
+
     @Test
     public void heuristicSuccessIsLearnedAsRule() {
         Sniffer s = new Sniffer();

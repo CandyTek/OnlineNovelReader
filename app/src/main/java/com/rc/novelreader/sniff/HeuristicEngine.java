@@ -37,9 +37,9 @@ public final class HeuristicEngine {
     private static final int CI = Pattern.CASE_INSENSITIVE;
 
     private static final Pattern NEXT = Pattern.compile(
-            "^(下一?[章页頁节節篇话話回张張]|下一章节|后一[章页]|next ?(chapter|page|part|episode)?)$", CI);
+            "^(?:加载|载入|阅读|继续阅读|继续|进入|点击进入|点击|翻到)?(下一?[章页頁节節篇话話回张張]|下一章节|后一[章页]|next ?(chapter|page|part|episode)?)$", CI);
     private static final Pattern PREV = Pattern.compile(
-            "^(上一?[章页頁节節篇话話回张張]|上一章节|前一[章页]|prev(ious)? ?(chapter|page|part|episode)?)$", CI);
+            "^(?:加载|载入|阅读|继续阅读|继续|进入|点击进入|点击|翻到)?(上一?[章页頁节節篇话話回张張]|上一章节|前一[章页]|prev(ious)? ?(chapter|page|part|episode)?)$", CI);
     private static final Pattern PAGEISH = Pattern.compile("[页頁]|page", CI);
     private static final Pattern TOC = Pattern.compile(
             "^(返?回?(章节|章節|全文|小说|本书)?(目录|目錄)(列表)?|章节列表|章節列表|返回书页|返回列表|返回书籍|书页"
@@ -47,7 +47,7 @@ public final class HeuristicEngine {
     private static final Pattern MORE_TOC = Pattern.compile(
             "^((查看|点击查看|显示|展开)?(全部|所有|完整|更多)(章节|章節)?(目录|目錄|列表)?(列表)?|(查看)?(章节|章節)?(目录|目錄)"
                     + "|(章节|章節)列表|all chapters|view all( chapters)?|table of contents|full (chapter )?list|chapter list)$", CI);
-    private static final Pattern NAV_ID = Pattern.compile("^(next|pb_next|next_url|nextchapter|next_chapter|next_chap|btn-next|linknext)$", CI);
+    private static final Pattern NAV_ID = Pattern.compile("^(next|pb_next|next_url|nextchapter|next_chapter|next_chap|btn-next|linknext|btn_?(load)?_?next_?(chapter)?)$", CI);
     private static final Pattern PREV_ID = Pattern.compile("^(prev|pb_prev|prev_url|prevchapter|prev_chapter|prev_chap|btn-prev|linkprev)$", CI);
 
     private static final Pattern POS_HINT = Pattern.compile(

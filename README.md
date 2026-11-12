@@ -141,8 +141,9 @@ link itself. Such answers are never taken as "no more chapters". The reader asks
 3 times), and at the end of a book that has no chapter list it asks the last page again for its next link. In
 the browser, on recognised novel sites, a tapped link that lands on another site is re-requested.
 
-Readers without any "next" link, which load the next chapter when you pull up at the bottom of the page, are
-followed too: the background page is scrolled to its end with a simulated finger drag and the address it moves
+A "next chapter" button without an address (a script decides where it goes) is pressed in the background page
+and the address it leads to is taken. Readers without any "next" link, which load the next chapter when you
+pull up at the bottom of the page, are followed too: the background page is scrolled to its end with a simulated finger drag and the address it moves
 to becomes the next chapter.
 
 No site is special-cased: built-in rules match page templates by structure only, never by host name.

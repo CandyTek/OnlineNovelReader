@@ -63,7 +63,7 @@ adb -s 192.168.0.123:5555 install -r app/build/outputs/apk/debug/NovelSniffer-de
 ```
 
 The noise to filter from build output is the `source value 8` / deprecation warnings; anything else is real.
-Test results: `app/build/test-results/testDebugUnitTest/*.xml` (currently 23 tests in 3 classes).
+Test results: `app/build/test-results/testDebugUnitTest/*.xml` (currently 24 tests in 3 classes).
 
 ## 4. Test device
 
@@ -209,7 +209,8 @@ assets/cosmetic.js       injected element hider; "__STRICT__" is replaced with t
   `data-link` or in an `onclick` location assignment (`HeuristicEngine.abs` reads all of them);
   anti-copy watermarks, i.e. one short Latin token glued to the end of many paragraphs of CJK text
   (`ContentCleaner.stripWatermark`); a heading that itself contains a title separator
-  ("Prologue——Mirror - Book - Site": the book is what follows the whole heading).
+  ("Prologue——Mirror - Book - Site": the book is what follows the whole heading); next/previous labels
+  with a verb in front ("加载下一章", "阅读下一章", "继续下一章").
 - A next/previous link that points at **another site** is never a chapter. The engine drops it and sets
   `ChapterContent.nextHijacked`, which tells the fetcher the real link is still unknown.
 - False positives seen and guarded against: search result pages (content-share penalty), server directory
@@ -265,7 +266,9 @@ The answers are random per request, so the rule everywhere is: ask the same addr
 Some readers have no next link at all: pulling up at the end of the page appends the next chapter and moves the
 address bar on to it (chapter ids are not consecutive, so the address cannot be guessed). For a book without a
 chapter list, `Library.loadChapter` passes `needNext` for the last known chapter; when the page then has no
-next link, `WebFetcher.scrollForNext` scrolls the already loaded page to its end, fires scroll, wheel and
+next link, `WebFetcher.scrollForNext` first presses the page's own "next chapter" control (`CLICK_JS`: the
+control exists but a script computes the address, e.g. `<a href="javascript:void(0)" data-type="next">`) and
+watches the address for 3.5 s; then it scrolls the already loaded page to its end, fires scroll, wheel and
 synthetic touch-drag events (`SCROLL_JS`; scroll events alone are not enough, such pages listen for the finger)
 and returns the address the page moves to. Limits: the address must change and stay on the same site; it
 costs the site one extra content request per chapter, which is unavoidable and therefore not behind a switch;
@@ -344,6 +347,10 @@ plain HTTP yields nothing usable. Whole-book caching is user-started (3 workers,
 - A page in the browser that has already appended several chapters by scrolling is sniffed as one chapter
   (all appended text under the first title). Reading mode should be entered before scrolling on.
 - Pull-to-continue readers that append chapters without changing the address are not followed.
+- Single-address web-app readers (the whole book under one URL, chapters fetched as fragments by script and
+  typeset in pages) are not supported: a chapter is identified by its address everywhere (`chapters.urlKey`).
+  Supporting them means driving the page's own reader in the hidden WebView and storing chapters without an
+  address; calling the site's fragment API directly would be a hard-coded site.
 - Never exercised on a device: location / camera / microphone prompts, full-screen video, file upload,
   HTTP login dialog, save as PDF, add to home screen, bookmark import/export, volume-key paging in the reader.
 - Built-in rule `wp-madara` is untested (no reachable site); the biquge
