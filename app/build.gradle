@@ -1,0 +1,50 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.rc.novelreader'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId "com.rc.novelreader"
+        minSdk 23
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+    buildFeatures {
+        buildConfig true
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+    testOptions {
+        unitTests.returnDefaultValues = true
+    }
+}
+
+dependencies {
+    implementation 'org.jsoup:jsoup:1.17.2'
+    testImplementation 'junit:junit:4.13.2'
+    // real org.json for JVM tests (android.jar only ships stubs)
+    testImplementation 'org.json:json:20231013'
+}
+
+android.applicationVariants.configureEach { variant ->
+    variant.outputs.configureEach {
+        outputFileName = "NovelSniffer-${variant.name}.apk"
+    }
+}

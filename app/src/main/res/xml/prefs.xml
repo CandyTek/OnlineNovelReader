@@ -1,0 +1,174 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
+    <PreferenceCategory android:title="@string/pref_cat_browser">
+        <ListPreference
+            android:defaultValue="bing"
+            android:entries="@array/search_engine_names"
+            android:entryValues="@array/search_engine_values"
+            android:key="search_engine"
+            android:summary="%s"
+            android:title="@string/pref_search_engine" />
+        <EditTextPreference
+            android:dialogMessage="@string/pref_search_custom_sum"
+            android:inputType="textUri"
+            android:key="search_custom"
+            android:summary="@string/pref_search_custom_sum"
+            android:title="@string/pref_search_custom" />
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="search_suggest"
+            android:summary="@string/pref_search_suggest_sum"
+            android:title="@string/pref_search_suggest" />
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="restore_tabs"
+            android:summary="@string/pref_restore_tabs_sum"
+            android:title="@string/pref_restore_tabs" />
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="new_window_same_tab"
+            android:summary="@string/pref_same_tab_sum"
+            android:title="@string/pref_same_tab" />
+        <Preference
+            android:key="default_browser"
+            android:title="@string/pref_default_browser" />
+    </PreferenceCategory>
+    <PreferenceCategory android:title="@string/pref_cat_content">
+        <ListPreference
+            android:defaultValue="default"
+            android:entries="@array/ua_names"
+            android:entryValues="@array/ua_values"
+            android:key="ua"
+            android:summary="%s"
+            android:title="@string/pref_ua" />
+        <EditTextPreference
+            android:key="ua_custom"
+            android:title="@string/pref_ua_custom" />
+        <SwitchPreference
+            android:defaultValue="true"
+            android:key="javascript"
+            android:summary="@string/pref_javascript_sum"
+            android:title="@string/javascript" />
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="block_images"
+            android:summary="@string/pref_images_sum"
+            android:title="@string/no_images" />
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="web_night"
+            android:summary="@string/pref_night_sum"
+            android:title="@string/night_mode" />
+        <Preference
+            android:key="user_scripts"
+            android:summary="@string/pref_scripts_sum"
+            android:title="@string/user_scripts" />
+    </PreferenceCategory>
+    <PreferenceCategory android:title="@string/pref_cat_privacy">
+        <SwitchPreference
+            android:defaultValue="true"
+            android:key="cookies"
+            android:title="@string/pref_cookies" />
+        <SwitchPreference
+            android:defaultValue="false"
+            android:dependency="cookies"
+            android:key="third_party_cookies"
+            android:title="@string/pref_third_party" />
+        <SwitchPreference
+            android:defaultValue="true"
+            android:key="allow_location"
+            android:summary="@string/pref_ask_sum"
+            android:title="@string/pref_location" />
+        <SwitchPreference
+            android:defaultValue="true"
+            android:key="allow_media"
+            android:summary="@string/pref_ask_sum"
+            android:title="@string/pref_media" />
+        <SwitchPreference
+            android:defaultValue="true"
+            android:key="open_apps"
+            android:summary="@string/pref_open_apps_sum"
+            android:title="@string/pref_open_apps" />
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="clear_on_exit"
+            android:summary="@string/pref_clear_exit_sum"
+            android:title="@string/pref_clear_exit" />
+        <Preference
+            android:key="clear_browsing"
+            android:summary="@string/pref_clear_browsing_sum"
+            android:title="@string/pref_clear_browsing" />
+    </PreferenceCategory>
+    <PreferenceCategory android:title="@string/pref_cat_adblock">
+        <SwitchPreference
+            android:defaultValue="true"
+            android:key="adblock"
+            android:summary="@string/pref_adblock_sum"
+            android:title="@string/pref_adblock" />
+        <SwitchPreference
+            android:defaultValue="true"
+            android:dependency="adblock"
+            android:key="cosmetic"
+            android:summary="@string/pref_cosmetic_sum"
+            android:title="@string/pref_cosmetic" />
+        <SwitchPreference
+            android:defaultValue="true"
+            android:dependency="adblock"
+            android:key="aggressive"
+            android:summary="@string/pref_aggressive_sum"
+            android:title="@string/pref_aggressive" />
+        <Preference
+            android:dependency="adblock"
+            android:key="ad_list"
+            android:title="@string/pref_ad_list" />
+        <Preference
+            android:key="ad_sites_off"
+            android:title="@string/pref_ad_sites_off" />
+    </PreferenceCategory>
+    <PreferenceCategory android:title="@string/pref_cat_sniff">
+        <SwitchPreference
+            android:defaultValue="true"
+            android:key="auto_sniff"
+            android:summary="@string/pref_auto_sniff_sum"
+            android:title="@string/pref_auto_sniff" />
+        <Preference
+            android:key="rules"
+            android:title="@string/pref_rules" />
+        <Preference
+            android:key="clear_learned"
+            android:title="@string/pref_clear_learned" />
+    </PreferenceCategory>
+    <!-- Requests the reader could do without. Every switch here must default to off (see AGENTS.md). -->
+    <PreferenceCategory android:title="@string/pref_cat_extra">
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="auto_check_updates"
+            android:summary="@string/pref_auto_check_sum"
+            android:title="@string/pref_auto_check" />
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="check_at_end"
+            android:summary="@string/pref_check_end_sum"
+            android:title="@string/pref_check_end" />
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="preload_chapters"
+            android:summary="@string/pref_preload_sum"
+            android:title="@string/pref_preload" />
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="auto_toc"
+            android:summary="@string/pref_auto_toc_sum"
+            android:title="@string/pref_auto_toc" />
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="load_covers"
+            android:summary="@string/pref_covers_sum"
+            android:title="@string/pref_covers" />
+    </PreferenceCategory>
+    <PreferenceCategory android:title="@string/pref_cat_data">
+        <Preference
+            android:key="about"
+            android:title="@string/pref_about" />
+    </PreferenceCategory>
+</PreferenceScreen>

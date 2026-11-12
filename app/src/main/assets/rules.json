@@ -1,0 +1,41 @@
+[
+  {
+    "name": "biquge-classic",
+    "signature": "#list dd a, .bookname h1",
+    "content": "#content",
+    "chapterTitle": ".bookname h1",
+    "chapterList": "#list dd a",
+    "bookTitle": "#info h1",
+    "cover": "#fmimg img@src",
+    "intro": "#intro"
+  },
+  {
+    "name": "biquge-new",
+    "signature": ".listmain dd a, #chaptercontent",
+    "content": "#chaptercontent",
+    "chapterList": ".listmain dd a[href$=html]",
+    "bookTitle": ".info h1, .book h1",
+    "cover": ".cover img@src",
+    "intro": ".intro dd, .book_about dd"
+  },
+  {
+    "name": "biquge-mobile",
+    "signature": "#chapterlist p a, #pb_next",
+    "content": "#chaptercontent, #nr1, #nr",
+    "chapterList": "#chapterlist p a[href$=html]",
+    "next": "#pb_next",
+    "prev": "#pb_prev",
+    "tocLink": "#pb_mulu"
+  },
+  {
+    "name": "wp-madara",
+    "signature": ".reading-content, .wp-manga-chapter",
+    "content": ".reading-content .text-left, .reading-content",
+    "chapterList": ".wp-manga-chapter > a",
+    "next": ".nav-next a",
+    "prev": ".nav-previous a",
+    "bookTitle": ".post-title h1",
+    "cover": ".summary_image img@src",
+    "intro": ".summary__content, .description-summary"
+  }
+]

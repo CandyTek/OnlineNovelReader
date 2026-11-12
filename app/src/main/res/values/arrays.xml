@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="search_engine_names">
+        <item>Bing</item>
+        <item>Baidu</item>
+        <item>Google</item>
+        <item>DuckDuckGo</item>
+        <item>Sogou</item>
+        <item>@string/custom</item>
+    </string-array>
+    <string-array name="search_engine_values" translatable="false">
+        <item>bing</item>
+        <item>baidu</item>
+        <item>google</item>
+        <item>ddg</item>
+        <item>sogou</item>
+        <item>custom</item>
+    </string-array>
+    <string-array name="ua_names">
+        <item>@string/ua_default</item>
+        <item>@string/ua_desktop</item>
+        <item>iPhone</item>
+        <item>@string/custom</item>
+    </string-array>
+    <string-array name="ua_values" translatable="false">
+        <item>default</item>
+        <item>desktop</item>
+        <item>iphone</item>
+        <item>custom</item>
+    </string-array>
+</resources>
