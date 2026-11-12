@@ -119,6 +119,9 @@ public class BrowserActivity extends Activity {
     private ValueCallback<Uri[]> fileCallback;
     private Runnable permGranted, permDenied;
 
+    /** A browser with its tabs exists in this app run (the shelf then steps aside instead of closing the app). */
+    public static boolean alive;
+
     public static void open(Context c, String queryOrUrl) {
         Intent i = new Intent(c, BrowserActivity.class);
         i.putExtra(EXTRA_QUERY, queryOrUrl);
@@ -249,6 +252,7 @@ public class BrowserActivity extends Activity {
         setupFind();
 
         if (savedInstanceState != null || App.prefs().getBoolean("restore_tabs", false)) restoreTabs();
+        alive = true;
         handleIntent(getIntent());
     }
 
@@ -270,6 +274,14 @@ public class BrowserActivity extends Activity {
         i.setAction(null);
         String u = q == null ? null : resolve(q);
         if (u != null) {
+            // coming back from the reader to the page it was opened from: no second tab for the same address
+            String key = Urls.normalize(u);
+            for (Tab t : tabs) {
+                if (!t.incognito && !t.address().isEmpty() && Urls.normalize(t.address()).equals(key)) {
+                    if (t != cur) switchTo(t);
+                    return;
+                }
+            }
             if (cur != null && cur.isHome()) {
                 cur.load(u);
                 refreshUi();
@@ -312,6 +324,7 @@ public class BrowserActivity extends Activity {
 
     @Override
     protected void onDestroy() {
+        alive = false;
         for (Tab t : tabs) t.destroyWeb();
         if (isFinishing() && App.prefs().getBoolean("clear_on_exit", false)) {
             clearData(this, new boolean[]{true, true, true, true, true});
@@ -480,8 +493,20 @@ public class BrowserActivity extends Activity {
             closeTab(cur); // a tab opened from a link returns to where it came from
             return true;
         }
-        if (mayFinish) finish();
+        if (mayFinish) leave();
         return false;
+    }
+
+    /**
+     * Back with nowhere to go back to. The browser is not closed: closing it would throw away every tab and
+     * its history. It steps behind the reader it was opened from, or behind the shelf.
+     */
+    private void leave() {
+        if (App.prefs().getBoolean("clear_on_exit", false)) {
+            finish();
+            return;
+        }
+        if (!ReaderActivity.bringToFront(this)) toShelf();
     }
 
     private void goHome() {
@@ -497,7 +522,8 @@ public class BrowserActivity extends Activity {
     }
 
     private void toShelf() {
-        startActivity(new Intent(this, ShelfActivity.class).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP));
+        // moved to the front, not "clear top": the shelf is usually underneath, and clearing would destroy this browser
+        startActivity(new Intent(this, ShelfActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
     }
 
     private boolean showBackForwardList() {
@@ -1897,7 +1923,7 @@ public class BrowserActivity extends Activity {
         else if (urlBox.hasFocus()) blurUrl();
         else if (!goBack(false)) {
             if (fullscreen) setFullscreen(false);
-            super.onBackPressed();
+            leave();
         }
     }
 

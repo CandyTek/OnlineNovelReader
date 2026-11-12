@@ -87,9 +87,31 @@ WebView (`net/WebFetcher`) for pages built by JavaScript or hidden behind inters
 `PageView` typesets chapters itself and renders them as pages (cover / slide / instant turn) or as a
 continuous vertical scroll, keeping the previous and next chapter loaded so turning never waits at a
 chapter boundary. `ReaderActivity` adds the menus: contents drawer (cached chapters highlighted,
-reversible), chapter slider, font size, line spacing, margins, five themes with a night toggle,
-brightness, keep-screen-on, volume-key paging, reload chapter, open the original page.
+reversible), chapter slider, font size, line spacing, themes with a night toggle, brightness, volume-key
+paging, reload chapter, open the original page.
 Reading position (chapter + text offset) is restored exactly, also after changing the font.
+
+Behind "More" in the reading menu:
+
+- **Tap zones**: the screen is a 3x3 grid, each cell opens the menu, turns back, turns forward or does nothing.
+  Default: left column back, right column forward, centre menu; one tap sets "everything but the centre
+  turns forward".
+- **Fonts**: system, serif, monospace, or any imported TTF/OTF file.
+- **Themes**: five flat colours, four paper textures (parchment, aged parchment, rice paper, kraft; computed
+  in the app, no picture files), and your own: background colour, text colour, a texture or a picture.
+- **Layout**: left/right/top/bottom margins, line, paragraph and letter spacing, first-line indent, bold,
+  header and footer on or off.
+- **Screen**: stays on always, for N minutes after the last touch (default 10), or as the system decides;
+  orientation lock; warm eye-care tint.
+- **Break reminder**: after N minutes of reading the reader locks for M minutes.
+- **Read aloud** with the system text-to-speech engine: the spoken passage is marked and the page follows,
+  speed, pitch, sleep timer, continues into the next chapter and with the screen off.
+- **Filler filter**: author notes, vote begging, thanks to donors, group plugs and lines repeated in every
+  chapter are left out at the start and end of chapters (`sniff/FillerFilter`, can be switched off).
+- **Selection**: long-press selects a sentence, drag or use the handles to extend it over paragraphs; then
+  copy, share, read aloud from there, replace or hide. Replacements (plain or regular expression, for one
+  book or all) are listed and edited under "Text replacements"; they never change the cached text.
+- Bookmarks, search in the cached chapters, automatic page turning.
 
 Books whose site has no contents page are read in *linked mode*: chapters are chained through their
 "next chapter" links as you read or cache.
@@ -159,7 +181,7 @@ default too.
 
 ## Not included
 
-Text-to-speech, page-curl animation, switching a book between source sites, and an LLM-based engine
+Page-curl animation, two-column pages in landscape, simplified/traditional conversion, switching a book between source sites, and an LLM-based engine
 (the second engine is algorithmic). In the browser: incognito tabs keep out of history and the tab session but
 share cookies with normal tabs (a WebView limitation), `blob:` downloads, QR scanning, page translation,
 bookmark folders and sync are not implemented.

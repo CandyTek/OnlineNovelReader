@@ -121,9 +121,20 @@ public class ShelfActivity extends Activity implements Events.Listener {
             return false;
         });
         findViewById(R.id.btnRefresh).setOnClickListener(v -> checkUpdates(true));
-        findViewById(R.id.btnBrowser).setOnClickListener(v -> startActivity(new Intent(this, BrowserActivity.class)));
+        findViewById(R.id.btnBrowser).setOnClickListener(v -> startActivity(new Intent(this, BrowserActivity.class)
+                .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)));
         findViewById(R.id.btnMenu).setOnClickListener(this::showMenu);
         Events.add(this);
+    }
+
+    /**
+     * While a browser with open tabs sits underneath, Back leaves the app without closing anything; finishing
+     * the shelf would show that browser again instead.
+     */
+    @Override
+    public void onBackPressed() {
+        if (BrowserActivity.alive) moveTaskToBack(true);
+        else super.onBackPressed();
     }
 
     @Override

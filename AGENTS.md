@@ -63,7 +63,7 @@ adb -s 192.168.0.123:5555 install -r app/build/outputs/apk/debug/NovelSniffer-de
 ```
 
 The noise to filter from build output is the `source value 8` / deprecation warnings; anything else is real.
-Test results: `app/build/test-results/testDebugUnitTest/*.xml` (currently 24 tests in 3 classes).
+Test results: `app/build/test-results/testDebugUnitTest/*.xml` (currently 30 tests in 4 classes).
 
 ## 4. Test device
 
@@ -159,6 +159,7 @@ sniff/                   PURE JAVA, no android.* imports: runs in JVM tests
   SiteRule.java          rule model + JSON; selector syntax "css@attr"
   HeuristicEngine.java   main-text block, nav links, chapter list, scores (the largest and most delicate file)
   ContentCleaner.java    ad/watermark line removal, hard-wrap reflow
+  FillerFilter.java      author notes / promotion at the two ends of a chapter (applied by the reader, not stored)
   PageResult.java        Type NONE/DETAIL/CHAPTER, BookInfo, ChapterRef, scores, selectors chosen
   Dom.java               jsoup helpers
 
@@ -180,7 +181,10 @@ browser/
                          WebView's onReceivedIcon; used by bookmarks, history, start tiles, suggestions, tab list
 
 reader/                  PageView (own typesetting: StaticLayout per paragraph, 3 chapter slots, modes
-                         COVER/SLIDE/NONE/SCROLL), ChapterLayout, ReaderActivity (menus, TOC drawer), ReaderPrefs
+                         COVER/SLIDE/NONE/SCROLL, tap grid, text selection, highlight), ChapterLayout,
+                         ReaderActivity (menus, TOC drawer, overlays), ReaderSheets (every dialog behind "More"),
+                         ReaderPrefs (all settings + themes), Backgrounds (generated paper textures, pictures),
+                         TextRules (user replacements), Speaker + SpeakService (text-to-speech)
 shelf/                   ShelfActivity (launcher), BookSheet, Covers/CoverView, DownloadService (book caching)
 data/                    Db (SQLite), Library (book logic), RuleStore (rules + novel hosts), Events, Book, Chapter
 settings/                SettingsActivity (+ res/xml/prefs.xml), RulesActivity, ScriptsActivity
@@ -243,6 +247,35 @@ assets/cosmetic.js       injected element hider; "__STRICT__" is replaced with t
 - File access is on only so saved offline pages (`files/offline/*.mht`) can load; `Tab.isOfflinePage` gates
   both navigation and sub-requests. Keep that gate if you touch file handling.
 - Pages never launch other apps without a user gesture **and** a confirmation dialog (`askOpenApp`).
+
+- **Leaving the browser never destroys it.** `BrowserActivity` holds all tabs and their history in memory, so
+  nothing may `finish()` it or start an activity below it with `FLAG_ACTIVITY_CLEAR_TOP`. The shelf button and
+  Back-with-nowhere-to-go bring the shelf (or a reader that is still open) to the front with
+  `FLAG_ACTIVITY_REORDER_TO_FRONT` (`leave()`); `ShelfActivity` answers Back with `moveTaskToBack` while
+  `BrowserActivity.alive`. Only "clear data on exit" still finishes it. An address handed to the browser that
+  is already open in a tab switches to that tab.
+
+### Reader
+
+- **Shown text is derived, cached text is raw.** `ReaderActivity.display()` = `FillerFilter.strip` (when on)
+  then `TextRules.apply`; the result lives only in the `memory` cache. Offsets (progress, bookmarks, selection,
+  speech) refer to the shown text. After changing a rule or the filter call `reprocess()`.
+- Settings are static fields of `ReaderPrefs`; change one, then call `ReaderActivity.changed()` (save,
+  re-typeset keeping the position, window flags). Themes are addressed by key ("b0".."b8" built in, "c..."
+  the user's), never by index.
+- Tap zones: `ReaderPrefs.zones`, 9 actions row by row. The zone editor refuses a grid without a menu cell.
+- Selection lives in `PageView` (chapter offsets in the current slot); the activity only shows the action bar
+  (`onSelection`). Any re-typesetting or page change drops it.
+- Screen: `keepAwake()` sets `FLAG_KEEP_SCREEN_ON` and clears it N minutes after the last
+  `onUserInteraction`. Break reminder: `restTick` counts foreground reading time (not while speech runs); the
+  end of the break is stored in the pref `r_rest_until`, so leaving the reader does not skip it.
+- Speech: `Speaker` feeds the engine one passage at a time and asks the activity for the next chapter
+  (`onSpeakChapterEnd`); `deliver()` restarts it when that chapter's text arrives. `SpeakService` is only a
+  foreground keep-alive so the process is not frozen with the screen off.
+- Paper textures are computed (`Backgrounds.texture`), off the main thread, one bitmap cached. Do not add
+  picture assets without a licence the owner has approved.
+- `Library.extendLinked` finding a chapter must be followed by moving there (`extendLinked()` in the activity
+  does `jumpTo`); the reader asked for the next chapter, not for a longer list.
 
 ### Hijacked navigation (ads in place of the next chapter)
 
@@ -351,10 +384,13 @@ plain HTTP yields nothing usable. Whole-book caching is user-started (3 workers,
   typeset in pages) are not supported: a chapter is identified by its address everywhere (`chapters.urlKey`).
   Supporting them means driving the page's own reader in the hidden WebView and storing chapters without an
   address; calling the site's fragment API directly would be a hard-coded site.
+- Reading aloud has not been run on a device (the test device has no speech engine installed; there it was
+  only checked that the missing engine is reported). Font import and background pictures (system file picker)
+  were not exercised either; screen-off timer and orientation lock only by reading the code.
 - Never exercised on a device: location / camera / microphone prompts, full-screen video, file upload,
   HTTP login dialog, save as PDF, add to home screen, bookmark import/export, volume-key paging in the reader.
 - Built-in rule `wp-madara` is untested (no reachable site); the biquge
   rules were only run against the mock template.
-- Not implemented: `blob:` downloads, QR scanning, page translation, bookmark folders, sync, text-to-speech,
-  page-curl animation, switching a book between source sites, an LLM-based engine.
+- Not implemented: `blob:` downloads, QR scanning, page translation, bookmark folders, sync,
+  page-curl animation, two-column landscape pages, switching a book between source sites, an LLM-based engine.
 - Author extraction fails on some real sites (5000yan, zggdwx).

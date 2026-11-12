@@ -18,7 +18,7 @@ import android.view.WindowManager;
 import android.widget.BaseAdapter;
 import android.widget.LinearLayout;
 import android.widget.ListView;
-import android.widget.PopupMenu;
+import android.widget.FrameLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
@@ -41,13 +41,27 @@ import java.util.Set;
 public class ReaderActivity extends Activity implements PageView.Host, Events.Listener {
     private static final String EXTRA_BOOK = "book", EXTRA_CHAPTER = "chapter";
 
-    private long bookId;
-    private Book book;
-    private List<Chapter> chapters = new ArrayList<>();
+    static final int REQ_FONT = 11, REQ_IMAGE = 12;
+
+    long bookId;
+    Book book;
+    List<Chapter> chapters = new ArrayList<>();
     private final LruCache<Long, String> memory = new LruCache<>(8);
     private final Set<Long> loading = new HashSet<>();
 
-    private PageView page;
+    PageView page;
+    private ReaderSheets sheets;
+    private Speaker speaker;
+    private final com.rc.novelreader.sniff.FillerFilter filler = new com.rc.novelreader.sniff.FillerFilter();
+    private List<ReaderPrefs.Theme> themeList = new ArrayList<>();
+    private View eyeView, restView, selBar, speechPanel;
+    private TextView restText, speakToggle, speakTimer, rateValue, pitchValue;
+    /** The user moved to another place while the book is read aloud: the voice follows once the text is there. */
+    private boolean speakFollow;
+    private boolean autoOn;
+    private long restUntil, tickAt;
+    /** Reading time since the last break; kept across reader sessions of one app run. */
+    private static long readMs, lastSeen;
     private View topBar, bottomBar, displayPanel, tocPanel;
     private TextView bookTitle, sourceUrl, btnShelf, btnNight, seekTip, tocInfo;
     private SeekBar seek;
@@ -55,6 +69,16 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     private BaseAdapter tocAdapter;
     private boolean tocReversed, opened, refreshingToc;
     private int savedIdx = -1, savedOffset = -1;
+
+    private static java.lang.ref.WeakReference<ReaderActivity> live;
+
+    /** Shows the reader that is already open, if there is one. */
+    public static boolean bringToFront(Context c) {
+        ReaderActivity r = live == null ? null : live.get();
+        if (r == null || r.isDestroyed() || r.isFinishing()) return false;
+        c.startActivity(new Intent(c, ReaderActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+        return true;
+    }
 
     public static void start(Context c, long bookId, int chapterIdx) {
         c.startActivity(new Intent(c, ReaderActivity.class).putExtra(EXTRA_BOOK, bookId).putExtra(EXTRA_CHAPTER, chapterIdx));
@@ -93,6 +117,10 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         page.setHost(this);
         page.setLoadingText(getString(R.string.loading));
         page.applyPrefs();
+        sheets = new ReaderSheets(this);
+        speaker = new Speaker(this, speechHost);
+        restUntil = App.prefs().getLong("r_rest_until", 0);
+        buildOverlays();
 
         final View root = findViewById(R.id.root);
         root.setOnApplyWindowInsetsListener((v, insets) -> {
@@ -106,6 +134,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             topBar.setPadding(0, top, 0, 0);
             bottomBar.setPadding(0, 0, 0, bottom);
             displayPanel.setPadding(displayPanel.getPaddingLeft(), displayPanel.getPaddingTop(), displayPanel.getPaddingRight(), bottom + App.dp(10));
+            speechPanel.setPadding(App.dp(14), App.dp(12), App.dp(14), bottom + App.dp(10));
             findViewById(R.id.tocBody).setPadding(0, top, 0, bottom);
             int cutTop = 0;
             if (Build.VERSION.SDK_INT >= 28 && insets.getDisplayCutout() != null) cutTop = insets.getDisplayCutout().getSafeInsetTop();
@@ -132,6 +161,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             openAt(Math.max(0, Math.min(idx, chapters.size() - 1)), offset);
         }
         bindBook();
+        live = new java.lang.ref.WeakReference<>(this);
         Events.add(this);
         registerReceiver(battery, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
         registerReceiver(tick, new IntentFilter(Intent.ACTION_TIME_TICK));
@@ -145,14 +175,35 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        if (book == null) return;
+        long now = System.currentTimeMillis();
+        // time away from the book longer than a break counts as one
+        if (lastSeen > 0 && now - lastSeen >= ReaderPrefs.restFor * 60000L) readMs = 0;
+        tickAt = now;
+        App.MAIN.removeCallbacks(restTick);
+        restTick.run();
+        keepAwake();
+    }
+
+    @Override
     protected void onPause() {
         saveProgress();
+        lastSeen = System.currentTimeMillis();
+        App.MAIN.removeCallbacks(restTick);
+        App.MAIN.removeCallbacks(screenOff);
+        stopAuto();
         super.onPause();
     }
 
     @Override
     protected void onDestroy() {
         if (book != null) {
+            speaker.release();
+            App.MAIN.removeCallbacks(restTick);
+            App.MAIN.removeCallbacks(screenOff);
+            App.MAIN.removeCallbacks(autoTick);
             Events.remove(this);
             try {
                 unregisterReceiver(battery);
@@ -210,7 +261,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         App.IO.execute(() -> {
             String text = null, error = null;
             try {
-                text = Library.loadChapter(book, c, false);
+                text = display(c, Library.loadChapter(book, c, false));
             } catch (Throwable t) {
                 error = t.getMessage() == null ? t.toString() : t.getMessage();
             }
@@ -228,11 +279,18 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         if (isDestroyed()) return;
         for (Chapter c : chapters) {
             if (c.id != chapterId) continue;
+            boolean current = opened && c.idx == page.currentIdx();
             if (text != null) {
                 c.cached = true;
                 page.setChapter(c.idx, c.displayTitle(), text);
+                if (current && speaker.active() && (speaker.waiting() || speakFollow)) {
+                    int from = speaker.waiting() ? 0 : page.currentOffset();
+                    speakFollow = false;
+                    speaker.speak(c.idx, c.displayTitle(), text, from);
+                }
             } else {
                 page.setError(c.idx, getString(R.string.load_failed, error == null ? "" : error));
+                if (current && speaker.active()) speaker.stop();
             }
             if (tocPanel.getVisibility() == View.VISIBLE) tocAdapter.notifyDataSetChanged();
             return;
@@ -259,6 +317,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
     @Override
     public void onEdge(boolean end) {
+        stopAuto();
         if (end && book.linked) {
             extendLinked();
             return;
@@ -287,8 +346,14 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
                 refreshingToc = false;
                 seekTip.setVisibility(View.GONE);
                 if (isDestroyed()) return;
-                if (more) reloadChapters();
-                else App.toast(getString(R.string.last_chapter));
+                if (more) {
+                    reloadChapters();
+                    // the reader asked for the next chapter: go there instead of waiting for a second tap
+                    if (page.currentIdx() + 1 < chapters.size()) jumpTo(page.currentIdx() + 1);
+                } else {
+                    App.toast(getString(R.string.last_chapter));
+                    if (speaker.waiting()) speaker.stop();
+                }
             });
         });
     }
@@ -413,21 +478,59 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     }
 
     private void jumpTo(int idx) {
+        jump(idx, 0);
+    }
+
+    void jump(int idx, int offset) {
         if (idx < 0 || idx >= chapters.size()) return;
-        openAt(idx, 0);
+        if (speaker.active()) speakFollow = true;
+        openAt(idx, offset);
         bindBook();
+    }
+
+    // ------------------------------------------------------------------ shown text
+
+    /** What the reader sees of a chapter: the fetched text minus filler, with the user's replacements. */
+    String display(Chapter c, String raw) {
+        if (raw == null) return null;
+        String t = ReaderPrefs.filler ? filler.strip(c.id, raw) : raw;
+        return TextRules.apply(bookId, t);
+    }
+
+    /** The text of a chapter as it is shown, null when it is not loaded. */
+    String shownText(int idx) {
+        return idx >= 0 && idx < chapters.size() ? memory.get(chapters.get(idx).id) : null;
+    }
+
+    /** The filter or the replacements changed: typeset the open chapter again. */
+    void reprocess() {
+        memory.evictAll();
+        if (!opened) return;
+        int idx = page.currentIdx(), off = page.currentOffset();
+        if (speaker.active()) speaker.stop();
+        openAt(idx, off);
+    }
+
+    /** Marks a passage for a few seconds (a search hit). */
+    void flash(final int idx, int a, int b) {
+        page.setHighlight(idx, a, b);
+        page.postDelayed(() -> {
+            if (!speaker.active()) page.setHighlight(-1, 0, 0);
+        }, 6000);
     }
 
     // ------------------------------------------------------------------ menus
 
     private boolean menuVisible() {
         return topBar.getVisibility() == View.VISIBLE || displayPanel.getVisibility() == View.VISIBLE
-                || tocPanel.getVisibility() == View.VISIBLE;
+                || tocPanel.getVisibility() == View.VISIBLE || speechPanel.getVisibility() == View.VISIBLE;
     }
 
     private void toggleMenu() {
         if (menuVisible()) hideMenus();
         else {
+            stopAuto();
+            page.clearSelection();
             bindBook();
             btnNight.setText(ReaderPrefs.isNight() ? R.string.day : R.string.night);
             topBar.setVisibility(View.VISIBLE);
@@ -442,6 +545,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         bottomBar.setVisibility(View.GONE);
         displayPanel.setVisibility(View.GONE);
         tocPanel.setVisibility(View.GONE);
+        speechPanel.setVisibility(View.GONE);
         page.setMenuOpen(false);
         showSystemUi(false);
     }
@@ -495,7 +599,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
                 String error = null;
                 String text = null;
                 try {
-                    text = Library.loadChapter(book, c, true);
+                    text = display(c, Library.loadChapter(book, c, true));
                 } catch (Throwable t) {
                     error = t.getMessage();
                 }
@@ -542,8 +646,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         });
         findViewById(R.id.btnToc).setOnClickListener(v -> showToc());
         btnNight.setOnClickListener(v -> {
-            if (ReaderPrefs.isNight()) ReaderPrefs.theme = ReaderPrefs.dayTheme;
-            else ReaderPrefs.theme = ReaderPrefs.NIGHT_THEME;
+            ReaderPrefs.toggleNight();
             ReaderPrefs.save();
             page.applyPrefs();
             btnNight.setText(ReaderPrefs.isNight() ? R.string.day : R.string.night);
@@ -555,42 +658,423 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             bindDisplayPanel();
             displayPanel.setVisibility(View.VISIBLE);
         });
-        findViewById(R.id.btnCache).setOnClickListener(v -> {
-            PopupMenu m = new PopupMenu(this, v);
-            m.getMenu().add(0, 1, 0, R.string.cache_next_50);
-            m.getMenu().add(0, 2, 0, R.string.cache_rest);
-            m.getMenu().add(0, 3, 0, R.string.cache_all);
-            m.setOnMenuItemClickListener(item -> {
-                int from = item.getItemId() == 3 ? 0 : page.currentIdx();
-                int count = item.getItemId() == 1 ? 50 : -1;
-                if (!book.inShelf) {
-                    Library.setShelf(bookId, true);
-                    book.inShelf = true;
-                }
-                DownloadService.start(this, bookId, from, count);
-                hideMenus();
-                return true;
-            });
-            m.show();
+        findViewById(R.id.btnSpeak).setOnClickListener(v -> {
+            if (!speaker.active() && !startSpeech(page.currentOffset())) return;
+            topBar.setVisibility(View.GONE);
+            bottomBar.setVisibility(View.GONE);
+            bindSpeech();
+            speechPanel.setVisibility(View.VISIBLE);
         });
+        findViewById(R.id.btnMore).setOnClickListener(v -> {
+            hideMenus();
+            sheets.more();
+        });
+    }
+
+    void cacheMenu() {
+        String[] items = {getString(R.string.cache_next_50), getString(R.string.cache_rest), getString(R.string.cache_all)};
+        new AlertDialog.Builder(this).setTitle(R.string.cache).setItems(items, (d, w) -> {
+            int from = w == 2 ? 0 : page.currentIdx();
+            int count = w == 0 ? 50 : -1;
+            if (!book.inShelf) {
+                Library.setShelf(bookId, true);
+                book.inShelf = true;
+            }
+            DownloadService.start(this, bookId, from, count);
+        }).show();
     }
 
     // ------------------------------------------------------------------ display settings
 
-    private void applyWindowPrefs() {
+    @SuppressWarnings("SourceLockedOrientationActivity")
+    void applyWindowPrefs() {
         WindowManager.LayoutParams lp = getWindow().getAttributes();
         lp.screenBrightness = ReaderPrefs.brightness < 0 ? WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
                 : Math.max(0.01f, ReaderPrefs.brightness / 100f);
         getWindow().setAttributes(lp);
-        if (ReaderPrefs.keepOn) getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        else getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        keepAwake();
+        int want = ReaderPrefs.orient == 1 ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                : ReaderPrefs.orient == 2 ? android.content.pm.ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                : android.content.pm.ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
+        if (getRequestedOrientation() != want) setRequestedOrientation(want);
+        if (eyeView != null) {
+            eyeView.setVisibility(ReaderPrefs.eye > 0 ? View.VISIBLE : View.GONE);
+            eyeView.setBackgroundColor(android.graphics.Color.argb(ReaderPrefs.eye * 2, 255, 150, 40));
+        }
     }
 
-    private void changed() {
+    void changed() {
         ReaderPrefs.save();
         page.applyPrefs();
         applyWindowPrefs();
         bindDisplayPanel();
+    }
+
+    void themesChanged() {
+        rebuildThemes();
+        changed();
+    }
+
+    // ------------------------------------------------------------------ screen timer, auto page, breaks
+
+    private final Runnable screenOff = () -> getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+
+    /** Keeps the screen on for the chosen time after the last touch; automatic page turning counts as reading. */
+    private void keepAwake() {
+        App.MAIN.removeCallbacks(screenOff);
+        if (ReaderPrefs.screenMin == 0 && !autoOn) {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            return;
+        }
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (ReaderPrefs.screenMin > 0 && !autoOn) App.MAIN.postDelayed(screenOff, ReaderPrefs.screenMin * 60000L);
+    }
+
+    @Override
+    public void onUserInteraction() {
+        super.onUserInteraction();
+        if (book != null) keepAwake();
+    }
+
+    private final Runnable autoTick = new Runnable() {
+        @Override
+        public void run() {
+            if (!autoOn) return;
+            if (!menuVisible() && !resting() && !page.hasSelection()) page.turn(true);
+            App.MAIN.postDelayed(this, ReaderPrefs.autoSec * 1000L);
+        }
+    };
+
+    void startAuto() {
+        hideMenus();
+        autoOn = true;
+        keepAwake();
+        App.MAIN.removeCallbacks(autoTick);
+        App.MAIN.postDelayed(autoTick, ReaderPrefs.autoSec * 1000L);
+        App.toast(getString(R.string.rd_auto_started));
+    }
+
+    private void stopAuto() {
+        if (!autoOn) return;
+        autoOn = false;
+        App.MAIN.removeCallbacks(autoTick);
+        keepAwake();
+        App.toast(getString(R.string.rd_auto_stopped));
+    }
+
+    private boolean resting() {
+        return restView != null && restView.getVisibility() == View.VISIBLE;
+    }
+
+    private final Runnable restTick = new Runnable() {
+        @Override
+        public void run() {
+            long now = System.currentTimeMillis();
+            if (restUntil > now) {
+                long left = (restUntil - now + 999) / 1000;
+                restText.setText(getString(R.string.rd_rest_now, String.format(java.util.Locale.US, "%d:%02d", left / 60, left % 60)));
+                if (!resting()) {
+                    stopAuto();
+                    hideMenus();
+                    page.clearSelection();
+                    restView.setVisibility(View.VISIBLE);
+                }
+                readMs = 0;
+            } else {
+                if (resting()) {
+                    restView.setVisibility(View.GONE);
+                    restUntil = 0;
+                    App.prefs().edit().remove("r_rest_until").apply();
+                    readMs = 0;
+                } else if (ReaderPrefs.restEvery <= 0) {
+                    readMs = 0;
+                } else {
+                    // listening is not reading; a long gap between ticks means the screen was off
+                    long d = now - tickAt;
+                    if (d < 5000 && !(speaker.active() && !speaker.paused())) readMs += d;
+                    if (readMs >= ReaderPrefs.restEvery * 60000L) {
+                        restUntil = now + ReaderPrefs.restFor * 60000L;
+                        // survives leaving the reader or restarting the app
+                        App.prefs().edit().putLong("r_rest_until", restUntil).apply();
+                    }
+                }
+            }
+            tickAt = now;
+            App.MAIN.postDelayed(this, 1000);
+        }
+    };
+
+    // ------------------------------------------------------------------ overlays built in code
+
+    private TextView panelChip(int text, View.OnClickListener l) {
+        TextView t = new TextView(this);
+        t.setText(text);
+        t.setGravity(android.view.Gravity.CENTER);
+        t.setTextSize(13);
+        t.setTextColor(0xFFE8ECE9);
+        t.setBackgroundResource(R.drawable.chip_bg);
+        t.setOnClickListener(l);
+        return t;
+    }
+
+    private LinearLayout panelRow(LinearLayout parent) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        parent.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, App.dp(46)));
+        return row;
+    }
+
+    private TextView stepRow(LinearLayout parent, int label, final Runnable minus, final Runnable plus) {
+        LinearLayout row = panelRow(parent);
+        TextView l = new TextView(this);
+        l.setText(label);
+        l.setTextSize(13);
+        l.setTextColor(0xFF8C9792);
+        row.addView(l, new LinearLayout.LayoutParams(App.dp(72), ViewGroup.LayoutParams.WRAP_CONTENT));
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, App.dp(36), 1);
+        lp.setMargins(App.dp(4), 0, App.dp(4), 0);
+        row.addView(panelChip(R.string.rd_minus, v -> minus.run()), lp);
+        TextView value = new TextView(this);
+        value.setGravity(android.view.Gravity.CENTER);
+        value.setTextSize(14);
+        value.setTextColor(0xFFE8ECE9);
+        row.addView(value, new LinearLayout.LayoutParams(App.dp(56), ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.addView(panelChip(R.string.rd_plus, v -> plus.run()), lp);
+        return value;
+    }
+
+    private void buildOverlays() {
+        FrameLayout root = findViewById(R.id.root);
+        // warm tint over the page, under the menus
+        eyeView = new View(this);
+        eyeView.setVisibility(View.GONE);
+        root.addView(eyeView, 1, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // menu next to selected text
+        LinearLayout bar = new LinearLayout(this);
+        bar.setBackgroundResource(R.drawable.tip_bg);
+        bar.setPadding(App.dp(4), 0, App.dp(4), 0);
+        int[] labels = {R.string.rd_copy, R.string.rd_replace, R.string.rd_hide, R.string.rd_paragraph, R.string.rd_speak_here, R.string.share};
+        for (int i = 0; i < labels.length; i++) {
+            final int which = i;
+            TextView t = new TextView(this);
+            t.setText(labels[i]);
+            t.setTextSize(13.5f);
+            t.setTextColor(0xFFFFFFFF);
+            t.setGravity(android.view.Gravity.CENTER);
+            t.setPadding(App.dp(11), 0, App.dp(11), 0);
+            t.setOnClickListener(v -> selectionAction(which));
+            bar.addView(t, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, App.dp(44)));
+        }
+        selBar = bar;
+        selBar.setVisibility(View.GONE);
+        root.addView(selBar, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL));
+
+        // read-aloud controls
+        LinearLayout sp = new LinearLayout(this);
+        sp.setOrientation(LinearLayout.VERTICAL);
+        sp.setBackgroundResource(R.color.reader_panel);
+        sp.setClickable(true);
+        LinearLayout row = panelRow(sp);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, App.dp(36), 1);
+        lp.setMargins(App.dp(4), 0, App.dp(4), 0);
+        speakToggle = panelChip(R.string.rd_pause, v -> {
+            if (!speaker.active()) startSpeech(page.currentOffset());
+            else if (speaker.paused()) speaker.resume();
+            else speaker.pause();
+        });
+        row.addView(speakToggle, lp);
+        row.addView(panelChip(R.string.stop, v -> {
+            speaker.stop();
+            hideMenus();
+        }), lp);
+        speakTimer = panelChip(R.string.rd_sleep_timer, v -> sheets.sleepTimer(speaker));
+        row.addView(speakTimer, lp);
+        row.addView(panelChip(R.string.rd_voice, v -> Speaker.openSystemSettings(this)), lp);
+        rateValue = stepRow(sp, R.string.rd_rate, () -> tune(-10, 0), () -> tune(10, 0));
+        pitchValue = stepRow(sp, R.string.rd_pitch, () -> tune(0, -10), () -> tune(0, 10));
+        speechPanel = sp;
+        speechPanel.setVisibility(View.GONE);
+        speechPanel.setPadding(App.dp(14), App.dp(12), App.dp(14), App.dp(10));
+        root.addView(speechPanel, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.BOTTOM));
+
+        // forced break: covers everything and swallows touches
+        FrameLayout rest = new FrameLayout(this);
+        rest.setBackgroundColor(0xFF101413);
+        rest.setClickable(true);
+        restText = new TextView(this);
+        restText.setTextColor(0xFFB9C2BD);
+        restText.setTextSize(19);
+        restText.setGravity(android.view.Gravity.CENTER);
+        restText.setLineSpacing(0, 1.5f);
+        restText.setPadding(App.dp(32), 0, App.dp(32), 0);
+        rest.addView(restText, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.CENTER));
+        restView = rest;
+        restView.setVisibility(View.GONE);
+        root.addView(restView, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    // ------------------------------------------------------------------ selection
+
+    @Override
+    public void onSelection(boolean active) {
+        if (!active || !page.hasSelection()) {
+            selBar.setVisibility(View.GONE);
+            return;
+        }
+        android.graphics.RectF r = page.selectionBounds();
+        int h = App.dp(44);
+        float y = r.top - h - App.dp(10);
+        if (y < App.dp(28)) y = Math.min(r.bottom + App.dp(10), page.getHeight() - h - App.dp(28));
+        selBar.setY(y);
+        selBar.setVisibility(View.VISIBLE);
+    }
+
+    @Override
+    public void onSelectionLongPress() {
+        String sel = page.selectedText();
+        if (!sel.isEmpty()) sheets.editRule(null, sel);
+    }
+
+    private void selectionAction(int which) {
+        final String sel = page.selectedText();
+        if (sel.isEmpty()) return;
+        switch (which) {
+            case 0:
+                ((android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE))
+                        .setPrimaryClip(android.content.ClipData.newPlainText("text", sel));
+                App.toast(getString(R.string.rd_copied));
+                page.clearSelection();
+                break;
+            case 1:
+                sheets.editRule(null, sel);
+                break;
+            case 2: {
+                // leave the passage out from now on; the rule can be removed under "Text replacements"
+                TextRules.Rule r = new TextRules.Rule();
+                r.find = sel;
+                r.book = bookId;
+                TextRules.all().add(r);
+                TextRules.save();
+                reprocess();
+                App.toast(getString(R.string.rd_hidden));
+                break;
+            }
+            case 3:
+                page.selectParagraphs();
+                break;
+            case 4: {
+                int from = page.selectionStart();
+                page.clearSelection();
+                startSpeech(Math.max(1, from));
+                break;
+            }
+            default:
+                page.clearSelection();
+                try {
+                    startActivity(Intent.createChooser(new Intent(Intent.ACTION_SEND).setType("text/plain")
+                            .putExtra(Intent.EXTRA_TEXT, sel), getString(R.string.share)));
+                } catch (RuntimeException ignored) {
+                }
+        }
+    }
+
+    // ------------------------------------------------------------------ reading aloud
+
+    /** @return false when the chapter's text is not there yet */
+    private boolean startSpeech(int offset) {
+        int idx = page.currentIdx();
+        String text = shownText(idx);
+        if (text == null) {
+            App.toast(getString(R.string.loading));
+            return false;
+        }
+        speakFollow = false;
+        speaker.speak(idx, chapters.get(idx).displayTitle(), text, offset);
+        return true;
+    }
+
+    private void tune(int rate, int pitch) {
+        ReaderPrefs.ttsRate = Math.max(30, Math.min(400, ReaderPrefs.ttsRate + rate));
+        ReaderPrefs.ttsPitch = Math.max(50, Math.min(200, ReaderPrefs.ttsPitch + pitch));
+        ReaderPrefs.save();
+        bindSpeech();
+        speaker.retune();
+    }
+
+    void bindSpeech() {
+        speakToggle.setText(!speaker.active() ? R.string.rd_start : speaker.paused() ? R.string.rd_resume : R.string.rd_pause);
+        int left = speaker.sleepLeft();
+        speakTimer.setText(left == 0 ? getString(R.string.rd_sleep_timer) : getString(R.string.rd_minutes, left));
+        speakTimer.setSelected(left > 0);
+        rateValue.setText(String.format(java.util.Locale.US, "%.1fx", ReaderPrefs.ttsRate / 100f));
+        pitchValue.setText(String.format(java.util.Locale.US, "%.1f", ReaderPrefs.ttsPitch / 100f));
+    }
+
+    private final Speaker.Host speechHost = new Speaker.Host() {
+        @Override
+        public void onSpeakPassage(int idx, int a, int b) {
+            page.setHighlight(idx, a, b);
+            if (b > a) page.reveal(idx, a);
+        }
+
+        @Override
+        public void onSpeakProgress(int idx, int offset) {
+            page.reveal(idx, offset);
+        }
+
+        @Override
+        public void onSpeakChapterEnd(int idx) {
+            if (isDestroyed()) return;
+            if (idx + 1 < chapters.size()) {
+                openAt(idx + 1, 0);
+                bindBook();
+            } else if (book.linked) {
+                if (page.currentIdx() != idx) openAt(idx, 0);
+                extendLinked();
+            } else {
+                App.toast(getString(R.string.last_chapter));
+                speaker.stop();
+            }
+        }
+
+        @Override
+        public void onSpeakState() {
+            if (isDestroyed()) return;
+            if (!speaker.active()) page.setHighlight(-1, 0, 0);
+            bindSpeech();
+        }
+
+        @Override
+        public void onSpeakError(int reason) {
+            App.toast(getString(reason == Speaker.NO_ENGINE ? R.string.rd_tts_no_engine : R.string.rd_tts_no_voice));
+        }
+    };
+
+    // ------------------------------------------------------------------ picking files
+
+    void pick(int request) {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                .setType(request == REQ_IMAGE ? "image/*" : "*/*");
+        try {
+            startActivityForResult(i, request);
+        } catch (RuntimeException e) {
+            try {
+                startActivityForResult(i.setAction(Intent.ACTION_GET_CONTENT), request);
+            } catch (RuntimeException ignored) {
+            }
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int request, int result, Intent data) {
+        super.onActivityResult(request, result, data);
+        if (result != RESULT_OK || data == null || data.getData() == null) return;
+        if (request == REQ_FONT) sheets.importFont(data.getData());
+        else if (request == REQ_IMAGE) sheets.importImage(data.getData());
     }
 
     private void setupDisplayPanel() {
@@ -621,28 +1105,49 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         click(R.id.fontPlus, () -> ReaderPrefs.textSp = Math.min(40, ReaderPrefs.textSp + 1));
         click(R.id.lineMinus, () -> ReaderPrefs.linePct = Math.max(110, ReaderPrefs.linePct - 10));
         click(R.id.linePlus, () -> ReaderPrefs.linePct = Math.min(250, ReaderPrefs.linePct + 10));
-        click(R.id.marginMinus, () -> ReaderPrefs.marginDp = Math.max(8, ReaderPrefs.marginDp - 4));
-        click(R.id.marginPlus, () -> ReaderPrefs.marginDp = Math.min(48, ReaderPrefs.marginDp + 4));
         click(R.id.modeCover, () -> ReaderPrefs.mode = PageView.COVER);
         click(R.id.modeSlide, () -> ReaderPrefs.mode = PageView.SLIDE);
         click(R.id.modeNone, () -> ReaderPrefs.mode = PageView.NONE);
         click(R.id.modeScroll, () -> ReaderPrefs.mode = PageView.SCROLL);
-        click(R.id.optKeepOn, () -> ReaderPrefs.keepOn = !ReaderPrefs.keepOn);
         click(R.id.optVolume, () -> ReaderPrefs.volumeKeys = !ReaderPrefs.volumeKeys);
+        findViewById(R.id.optFont).setOnClickListener(v -> sheets.fonts());
+        findViewById(R.id.optLayout).setOnClickListener(v -> {
+            hideMenus();
+            sheets.layout();
+        });
+        rebuildThemes();
+    }
 
+    /** One dot per theme; the user's own can be edited with a long press, "+" makes a new one. */
+    private void rebuildThemes() {
         LinearLayout row = findViewById(R.id.themeRow);
-        for (int i = 0; i < ReaderPrefs.THEMES.length; i++) {
-            final int theme = i;
+        row.removeAllViews();
+        themeList = ReaderPrefs.themes();
+        for (final ReaderPrefs.Theme t : themeList) {
             View dot = new View(this);
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, App.dp(34), 1);
-            lp.setMargins(App.dp(6), 0, App.dp(6), 0);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(App.dp(46), App.dp(34));
+            lp.setMargins(App.dp(5), 0, App.dp(5), 0);
             row.addView(dot, lp);
             dot.setOnClickListener(v -> {
-                ReaderPrefs.theme = theme;
-                if (theme < ReaderPrefs.NIGHT_THEME) ReaderPrefs.dayTheme = theme;
+                ReaderPrefs.select(t);
                 changed();
             });
+            dot.setOnLongClickListener(v -> {
+                if (!t.custom()) return false;
+                sheets.editTheme(t);
+                return true;
+            });
         }
+        TextView plus = new TextView(this);
+        plus.setText(R.string.rd_plus);
+        plus.setGravity(android.view.Gravity.CENTER);
+        plus.setTextColor(0xFFE8ECE9);
+        plus.setTextSize(18);
+        plus.setBackgroundResource(R.drawable.chip_bg);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(App.dp(46), App.dp(34));
+        lp.setMargins(App.dp(5), 0, App.dp(5), 0);
+        row.addView(plus, lp);
+        plus.setOnClickListener(v -> sheets.editTheme(null));
     }
 
     private void click(int id, final Runnable change) {
@@ -655,21 +1160,26 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     private void bindDisplayPanel() {
         ((TextView) findViewById(R.id.fontValue)).setText(String.valueOf(ReaderPrefs.textSp));
         ((TextView) findViewById(R.id.lineValue)).setText(String.format(java.util.Locale.US, "%.1f", ReaderPrefs.linePct / 100f));
-        ((TextView) findViewById(R.id.marginValue)).setText(String.valueOf(ReaderPrefs.marginDp));
         findViewById(R.id.modeCover).setSelected(ReaderPrefs.mode == PageView.COVER);
         findViewById(R.id.modeSlide).setSelected(ReaderPrefs.mode == PageView.SLIDE);
         findViewById(R.id.modeNone).setSelected(ReaderPrefs.mode == PageView.NONE);
         findViewById(R.id.modeScroll).setSelected(ReaderPrefs.mode == PageView.SCROLL);
-        findViewById(R.id.optKeepOn).setSelected(ReaderPrefs.keepOn);
         findViewById(R.id.optVolume).setSelected(ReaderPrefs.volumeKeys);
         findViewById(R.id.brightSystem).setSelected(ReaderPrefs.brightness < 0);
         ((SeekBar) findViewById(R.id.brightSeek)).setProgress(ReaderPrefs.brightness < 0 ? 50 : ReaderPrefs.brightness);
         LinearLayout row = findViewById(R.id.themeRow);
-        for (int i = 0; i < row.getChildCount(); i++) {
+        for (int i = 0; i < themeList.size() && i < row.getChildCount(); i++) {
+            ReaderPrefs.Theme t = themeList.get(i);
+            boolean on = t.key.equals(ReaderPrefs.themeKey);
             GradientDrawable d = new GradientDrawable();
             d.setCornerRadius(App.dp(17));
-            d.setColor(ReaderPrefs.THEMES[i][0]);
-            d.setStroke(App.dp(i == ReaderPrefs.theme ? 2 : 1), i == ReaderPrefs.theme ? 0xFF6FBFAE : 0x55FFFFFF);
+            // a texture or picture shows as a shaded dot
+            if (t.texture != 0 || !t.image.isEmpty()) {
+                d.setOrientation(GradientDrawable.Orientation.TL_BR);
+                d.setColors(new int[]{t.bg, android.graphics.Color.rgb(android.graphics.Color.red(t.bg) * 3 / 4,
+                        android.graphics.Color.green(t.bg) * 3 / 4, android.graphics.Color.blue(t.bg) * 2 / 3)});
+            } else d.setColor(t.bg);
+            d.setStroke(App.dp(on ? 2 : 1), on ? 0xFF6FBFAE : 0x55FFFFFF);
             row.getChildAt(i).setBackground(d);
         }
     }
@@ -750,12 +1260,12 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (ReaderPrefs.volumeKeys && !menuVisible()
+        if (ReaderPrefs.volumeKeys && !menuVisible() && !(speaker.active() && !speaker.paused())
                 && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP)) {
-            page.turn(keyCode == KeyEvent.KEYCODE_VOLUME_DOWN);
+            if (!resting()) page.turn(keyCode == KeyEvent.KEYCODE_VOLUME_DOWN);
             return true;
         }
-        if (keyCode == KeyEvent.KEYCODE_MENU) {
+        if (keyCode == KeyEvent.KEYCODE_MENU && !resting()) {
             toggleMenu();
             return true;
         }
@@ -764,15 +1274,20 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        if (ReaderPrefs.volumeKeys && !menuVisible()
+        if (ReaderPrefs.volumeKeys && !menuVisible() && !(speaker.active() && !speaker.paused())
                 && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP)) return true;
         return super.onKeyUp(keyCode, event);
     }
 
     @Override
     public void onBackPressed() {
-        if (displayPanel.getVisibility() == View.VISIBLE || tocPanel.getVisibility() == View.VISIBLE) {
+        if (displayPanel.getVisibility() == View.VISIBLE || tocPanel.getVisibility() == View.VISIBLE
+                || speechPanel.getVisibility() == View.VISIBLE) {
             hideMenus();
+            return;
+        }
+        if (page.hasSelection()) {
+            page.clearSelection();
             return;
         }
         if (!book.inShelf && opened) {

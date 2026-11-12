@@ -1,6 +1,7 @@
 package com.rc.novelreader.reader;
 
 import android.graphics.Canvas;
+import android.graphics.Paint;
 import android.text.Layout;
 import android.text.StaticLayout;
 import android.text.TextPaint;
@@ -23,6 +24,12 @@ final class ChapterLayout {
         float top, bottom;
         /** Offset of the line's first character in the chapter text. */
         int offset;
+        /** Chapter offset just past the line's last character. */
+        int end;
+        /** Chapter offset of the paragraph the line belongs to; -1 for the heading, which is not chapter text. */
+        int paraStart = -1;
+        /** Characters of indentation put in front of the paragraph (they are not chapter text either). */
+        int indentLen;
     }
 
     final List<Line> lines = new ArrayList<>();
@@ -31,19 +38,19 @@ final class ChapterLayout {
     float height;
 
     static ChapterLayout build(String title, String text, TextPaint paint, TextPaint titlePaint,
-                               int width, int pageHeight, float lineMult) {
+                               int width, int pageHeight, float lineMult, float paraMult, boolean indentOn) {
         ChapterLayout cl = new ChapterLayout();
         float y = 0;
         float textSize = paint.getTextSize();
         if (title != null && !title.isEmpty()) {
             y += textSize * 0.4f;
             StaticLayout tl = make(title, titlePaint, width, 1.25f);
-            cl.add(tl, y, 0, 0);
+            cl.add(tl, y, -1, 0);
             y += tl.getHeight() + textSize * 1.3f;
         }
         boolean cjk = Texts.mostlyCjk(text);
-        String indent = cjk ? "　　" : "";
-        float paraGap = textSize * (cjk ? 0.55f : 0.9f) * Math.max(0.6f, lineMult - 0.8f) / 0.75f;
+        String indent = cjk && indentOn ? "　　" : "";
+        float paraGap = textSize * (cjk ? 0.55f : 0.9f) * Math.max(0.6f, lineMult - 0.8f) / 0.75f * paraMult;
         int pos = 0, n = text.length();
         while (pos <= n) {
             int nl = text.indexOf('\n', pos);
@@ -87,7 +94,11 @@ final class ChapterLayout {
             ln.layoutTop = y;
             ln.top = y + l.getLineTop(i);
             ln.bottom = y + l.getLineBottom(i);
-            ln.offset = paraStart + Math.max(0, l.getLineStart(i) - indentLen);
+            ln.paraStart = paraStart;
+            ln.indentLen = indentLen;
+            int base = Math.max(0, paraStart);
+            ln.offset = base + Math.max(0, l.getLineStart(i) - indentLen);
+            ln.end = paraStart < 0 ? 0 : base + Math.max(0, l.getLineEnd(i) - indentLen);
             lines.add(ln);
         }
     }
@@ -129,6 +140,33 @@ final class ChapterLayout {
         return lo;
     }
 
+    /** Index of the text line that holds the chapter offset, -1 when there is no text. */
+    int lineOfOffset(int offset) {
+        int found = -1;
+        for (int i = 0; i < lines.size(); i++) {
+            Line l = lines.get(i);
+            if (l.paraStart < 0) continue;
+            if (l.offset <= offset || found < 0) found = i;
+            else break;
+        }
+        return found;
+    }
+
+    /** Chapter offset of the character at x on the line, -1 for the heading. */
+    int offsetAt(int lineIdx, float x) {
+        Line l = lines.get(lineIdx);
+        if (l.paraStart < 0) return -1;
+        int o = l.paraStart + Math.max(0, l.layout.getOffsetForHorizontal(l.line, x) - l.indentLen);
+        return Math.max(l.offset, Math.min(o, Math.max(l.offset, l.end - 1)));
+    }
+
+    /** x of the chapter offset on the line; an offset at or past the line's end gives its right edge. */
+    float xOf(int lineIdx, int offset) {
+        Line l = lines.get(lineIdx);
+        if (offset >= l.end) return l.layout.getLineRight(l.line);
+        return l.layout.getPrimaryHorizontal(Math.max(l.offset, offset) - l.paraStart + l.indentLen);
+    }
+
     /** Draws lines [from, to) with the column's y=0 at the canvas origin. */
     void draw(Canvas c, int from, int to, int width) {
         int i = from;
@@ -143,6 +181,17 @@ final class ChapterLayout {
             a.layout.draw(c);
             c.restore();
             i = j + 1;
+        }
+    }
+
+    /** Paints the background of the chapter text [a, b) on lines [from, to). */
+    void mark(Canvas c, int from, int to, int a, int b, Paint p) {
+        for (int i = from; i < to; i++) {
+            Line l = lines.get(i);
+            if (l.paraStart < 0 || l.end <= a || l.offset >= b || l.end <= l.offset) continue;
+            float x1 = xOf(i, a);
+            float x2 = xOf(i, b);
+            if (x2 > x1) c.drawRect(x1, l.top, x2, l.bottom, p);
         }
     }
 }
