@@ -20,6 +20,14 @@ public final class Db extends SQLiteOpenHelper {
         return instance.getWritableDatabase();
     }
 
+    /** Closes the database so its file can be copied or replaced; the next {@link #get} opens it again. */
+    public static synchronized void closeAll() {
+        if (instance != null) {
+            instance.close();
+            instance = null;
+        }
+    }
+
     private Db(Context c) {
         super(c, "novel.db", null, 2);
     }

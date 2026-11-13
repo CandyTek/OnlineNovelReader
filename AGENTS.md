@@ -63,7 +63,7 @@ adb -s 192.168.0.123:5555 install -r app/build/outputs/apk/debug/NovelSniffer-de
 ```
 
 The noise to filter from build output is the `source value 8` / deprecation warnings; anything else is real.
-Test results: `app/build/test-results/testDebugUnitTest/*.xml` (currently 30 tests in 4 classes).
+Test results: `app/build/test-results/testDebugUnitTest/*.xml` (currently 35 tests in 5 classes).
 
 ## 4. Test device
 
@@ -152,6 +152,8 @@ App.java                 Application: UA (WebView UA minus "; wv"), MAIN handler
                          prefs(), toast(), dp()
 util/Urls.java           resolve, normalize, host, registrable, sameSite, chapterKey, pageNo, sameChapter, fromInput
 util/Texts.java          chapter-title patterns (STRONG/WEAK), Chinese numerals, wlen (CJK = 2)
+util/BookParser.java     pure Java: text file -> chapters, EPUB (zip + jsoup) -> chapters
+util/Hanzi.java          pure Java: simplified/traditional conversion from assets/hanzi.txt
 
 sniff/                   PURE JAVA, no android.* imports: runs in JVM tests
   Sniffer.java           analyze(url, html) -> PageResult; learns per-host rules from confident heuristics
@@ -184,9 +186,12 @@ reader/                  PageView (own typesetting: StaticLayout per paragraph, 
                          COVER/SLIDE/NONE/SCROLL, tap grid, text selection, highlight), ChapterLayout,
                          ReaderActivity (menus, TOC drawer, overlays), ReaderSheets (every dialog behind "More"),
                          ReaderPrefs (all settings + themes), Backgrounds (generated paper textures, pictures),
-                         TextRules (user replacements), Speaker + SpeakService (text-to-speech)
+                         TextRules (user replacements), Speaker + SpeakService (text-to-speech, system
+                         engine or a web service), ReaderTools (dialogs: notes, statistics, word list, look-up,
+                         AI, gestures, speed reading), Notes, Stats, Vocab, Ai (the optional assistant's HTTP)
 shelf/                   ShelfActivity (launcher), BookSheet, Covers/CoverView, DownloadService (book caching)
-data/                    Db (SQLite), Library (book logic), RuleStore (rules + novel hosts), Events, Book, Chapter
+data/                    Db (SQLite), Library (book logic), RuleStore (rules + novel hosts), Events, Book, Chapter,
+                         LocalBooks (TXT/EPUB import), Backup (zip of everything, restore, WebDAV put/get)
 settings/                SettingsActivity (+ res/xml/prefs.xml), RulesActivity, ScriptsActivity
 
 assets/rules.json        built-in template rules      assets/adhosts.txt   bundled ad hosts
@@ -274,6 +279,27 @@ assets/cosmetic.js       injected element hider; "__STRICT__" is replaced with t
   foreground keep-alive so the process is not frozen with the screen off.
 - Paper textures are computed (`Backgrounds.texture`), off the main thread, one bitmap cached. Do not add
   picture assets without a licence the owner has approved.
+- Page view: a "page" is a spread of `cols` columns (2 when wide and `twoPage`); `ChapterLayout.pages` are
+  columns, so every use goes through `pages(slot)`, `colLines`, `colOf`, `originY(k)`. Curl mode draws the
+  turning page and the one under it into two bitmaps per turn (`prepareCurl`); when they cannot be allocated
+  the turn falls back to the cover animation. Turning back is the same fold with the pages swapped.
+- Actions: tap zones and gestures share one list (`ReaderPrefs.A_*`, stored as base-36 digits). The view does
+  menu / previous / next itself and hands the rest to `ReaderActivity.onAction`.
+- Highlights (`Notes`) store the passage text and are re-anchored to the shown text (`Notes.ranges`); the
+  activity caches the ranges per chapter in `noteRanges` and must drop them when text or notes change. A
+  passage that no longer occurs (a replacement rule, script conversion) is not drawn but stays in the list.
+- Statistics (`Stats`) are fed from `restTick`: reader in front, no break, not listening, a touch within
+  three minutes (or auto page running).
+- `Ai` is plain `HttpURLConnection` on purpose (no SDK, see ground rules). Two formats: Claude Messages
+  (`x-api-key`, `anthropic-version: 2023-06-01`, text blocks only, `stop_reason: "refusal"` reported) and
+  OpenAI-style chat completions. No request without a key and a tap. Summaries are cached per chapter id in
+  the prefs file `reader_ai`; "ask" sends only summaries and the part of the chapter already read.
+- Online voice and WebDAV are requests to servers the user entered, made only on the user's action; they are
+  off while their address is empty. Keys and passwords (`ai_key`, `webdav_pass`) are never written to a backup.
+- Imported books (`Book.local()`, urlKey `local:<time>`): chapters have an empty url and the cached text
+  is the only copy, so `Library.clearCache` skips them and nothing may fetch for them.
+- `Backup.restore` swaps the database file and all preference files under the running app: the caller must
+  end the process afterwards (`ShelfActivity.restored`).
 - `Library.extendLinked` finding a chapter must be followed by moving there (`extendLinked()` in the activity
   does `jumpTo`); the reader asked for the next chapter, not for a longer list.
 
@@ -384,13 +410,19 @@ plain HTTP yields nothing usable. Whole-book caching is user-started (3 workers,
   typeset in pages) are not supported: a chapter is identified by its address everywhere (`chapters.urlKey`).
   Supporting them means driving the page's own reader in the hidden WebView and storing chapters without an
   address; calling the site's fragment API directly would be a hard-coded site.
-- Reading aloud has not been run on a device (the test device has no speech engine installed; there it was
-  only checked that the missing engine is reported). Font import and background pictures (system file picker)
-  were not exercised either; screen-off timer and orientation lock only by reading the code.
+- Reading aloud with the **system** engine has not been run on a device (the test device has none; the
+  passage loop, highlight, pause and chapter hand-over were run there through the online voice against a
+  server that answers every request with a beep). Font import and background pictures (system file picker)
+  were not exercised; screen-off timer only by reading the code.
+- The AI assistant has never made a real request (no key at hand): only its settings dialog was opened.
+  WebDAV upload/download, EPUB import on a device (unit test only), the word-list review cards, the night
+  schedule, shake, double tap and the brightness edge are untested on a device.
+- Simplified to traditional is one character to one character (first OpenCC candidate), so the usual
+  one-to-many slips appear; no phrase table.
 - Never exercised on a device: location / camera / microphone prompts, full-screen video, file upload,
   HTTP login dialog, save as PDF, add to home screen, bookmark import/export, volume-key paging in the reader.
 - Built-in rule `wp-madara` is untested (no reachable site); the biquge
   rules were only run against the mock template.
-- Not implemented: `blob:` downloads, QR scanning, page translation, bookmark folders, sync,
-  page-curl animation, two-column landscape pages, switching a book between source sites, an LLM-based engine.
+- Not implemented: `blob:` downloads, QR scanning, page translation, bookmark folders, automatic sync,
+  switching a book between source sites, an LLM-based sniffing engine, a voice per character, PDF/MOBI import.
 - Author extraction fails on some real sites (5000yan, zggdwx).

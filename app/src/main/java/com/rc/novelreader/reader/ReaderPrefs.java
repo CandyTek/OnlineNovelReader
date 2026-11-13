@@ -70,6 +70,12 @@ public final class ReaderPrefs {
     public static final int Z_MENU = 0, Z_PREV = 1, Z_NEXT = 2, Z_NONE = 3;
     public static final int[] ZONES_DEFAULT = {Z_PREV, Z_PREV, Z_NEXT, Z_PREV, Z_MENU, Z_NEXT, Z_PREV, Z_NEXT, Z_NEXT};
     public static final int[] ZONES_ALL_NEXT = {Z_NEXT, Z_NEXT, Z_NEXT, Z_NEXT, Z_MENU, Z_NEXT, Z_NEXT, Z_NEXT, Z_NEXT};
+    /** More things a zone or a gesture can do; the page view passes these on to the activity. */
+    public static final int A_PREV_CHAPTER = 4, A_NEXT_CHAPTER = 5, A_CONTENTS = 6, A_NIGHT = 7, A_BOOKMARK = 8,
+            A_SPEAK = 9, A_AUTO = 10, A_SEARCH = 11, A_BACK = 12, A_COUNT = 13;
+    /** Gestures: swipe up, swipe down (paged modes only), double tap. */
+    public static final int G_UP = 0, G_DOWN = 1, G_DOUBLE = 2;
+    public static final int[] GESTURES_DEFAULT = {Z_NONE, Z_NONE, Z_NONE};
 
     public static int textSp = 19;
     /** Line height multiplier x100. */
@@ -104,6 +110,28 @@ public final class ReaderPrefs {
     /** Speech rate and pitch x100. */
     public static int ttsRate = 100, ttsPitch = 100;
 
+    public static int[] gestures = GESTURES_DEFAULT.clone();
+    /** A vertical drag along the left edge changes the brightness. */
+    public static boolean edgeBright = false;
+    /** Two pages side by side when the screen is wide. */
+    public static boolean twoPage = true;
+    /** Dim all but a movable band of lines. */
+    public static boolean ruler = false;
+    /** Shaking the device starts or pauses reading aloud. */
+    public static boolean shake = false;
+    /** One of the {@link com.rc.novelreader.util.Hanzi} directions. */
+    public static int convert = 0;
+    /** Automatic scrolling in scroll mode, dp per second. */
+    public static int autoSpeed = 30;
+    /** Night theme between these minutes of the day; -1 = no schedule. */
+    public static int nightFrom = -1, nightTo = -1;
+    /** Speech from a web service instead of the system engine: the address with {{speakText}} in it. */
+    public static String ttsUrl = "";
+    public static boolean ttsOnline = false;
+    /** Index of the highlight colour used last. */
+    public static int noteColor = 0;
+    public static final int[] NOTE_COLORS = {0xFFF2C14E, 0xFF7BC96F, 0xFF6FB7E8, 0xFFE88A9A, 0xFFB79CED};
+
     private static List<Theme> custom = new ArrayList<>();
     private static Typeface face;
     private static String faceKey;
@@ -131,7 +159,19 @@ public final class ReaderPrefs {
         // the old switch was "always on" / "system"
         screenMin = p.getInt("r_screen_min", p.getBoolean("r_keep_on", true) ? 10 : 0);
         volumeKeys = p.getBoolean("r_vol", true);
-        zones = parseZones(p.getString("r_zones", ""));
+        zones = parseActions(p.getString("r_zones", ""), ZONES_DEFAULT);
+        gestures = parseActions(p.getString("r_gestures", ""), GESTURES_DEFAULT);
+        edgeBright = p.getBoolean("r_edge_bright", false);
+        twoPage = p.getBoolean("r_two_page", true);
+        ruler = p.getBoolean("r_ruler", false);
+        shake = p.getBoolean("r_shake", false);
+        convert = p.getInt("r_convert", 0);
+        autoSpeed = Math.max(4, p.getInt("r_auto_speed", 30));
+        nightFrom = p.getInt("r_night_from", -1);
+        nightTo = p.getInt("r_night_to", -1);
+        ttsUrl = p.getString("r_tts_url", "");
+        ttsOnline = p.getBoolean("r_tts_online", false);
+        noteColor = Math.max(0, Math.min(NOTE_COLORS.length - 1, p.getInt("r_note_color", 0)));
         restEvery = p.getInt("r_rest_every", 0);
         restFor = Math.max(1, p.getInt("r_rest_for", 5));
         filler = p.getBoolean("r_filler", true);
@@ -161,8 +201,9 @@ public final class ReaderPrefs {
     }
 
     public static void save() {
-        StringBuilder z = new StringBuilder();
-        for (int v : zones) z.append(v);
+        StringBuilder z = new StringBuilder(), g = new StringBuilder();
+        for (int v : zones) z.append(Character.forDigit(v, 36));
+        for (int v : gestures) g.append(Character.forDigit(v, 36));
         JSONArray arr = new JSONArray();
         try {
             for (Theme t : custom) {
@@ -180,14 +221,31 @@ public final class ReaderPrefs {
                 .putString("r_zones", z.toString()).putInt("r_rest_every", restEvery).putInt("r_rest_for", restFor)
                 .putBoolean("r_filler", filler).putInt("r_orient", orient).putInt("r_eye", eye)
                 .putInt("r_auto_sec", autoSec).putInt("r_tts_rate", ttsRate).putInt("r_tts_pitch", ttsPitch)
-                .putString("r_themes", arr.toString()).apply();
+                .putString("r_themes", arr.toString())
+                .putString("r_gestures", g.toString()).putBoolean("r_edge_bright", edgeBright)
+                .putBoolean("r_two_page", twoPage).putBoolean("r_ruler", ruler).putBoolean("r_shake", shake)
+                .putInt("r_convert", convert).putInt("r_auto_speed", autoSpeed).putInt("r_night_from", nightFrom)
+                .putInt("r_night_to", nightTo).putString("r_tts_url", ttsUrl).putBoolean("r_tts_online", ttsOnline)
+                .putInt("r_note_color", noteColor).apply();
     }
 
-    private static int[] parseZones(String s) {
-        if (s.length() != 9) return ZONES_DEFAULT.clone();
-        int[] z = new int[9];
-        for (int i = 0; i < 9; i++) z[i] = Math.max(0, Math.min(3, s.charAt(i) - '0'));
+    /** One base-36 digit per action; anything unreadable gives the default. */
+    private static int[] parseActions(String s, int[] def) {
+        if (s.length() != def.length) return def.clone();
+        int[] z = new int[def.length];
+        for (int i = 0; i < z.length; i++) {
+            int v = Character.digit(s.charAt(i), 36);
+            z[i] = v < 0 || v >= A_COUNT ? def[i] : v;
+        }
         return z;
+    }
+
+    /** Whether the night schedule says it is night now; false without a schedule. */
+    public static boolean scheduledNight() {
+        if (nightFrom < 0 || nightTo < 0 || nightFrom == nightTo) return false;
+        java.util.Calendar c = java.util.Calendar.getInstance();
+        int now = c.get(java.util.Calendar.HOUR_OF_DAY) * 60 + c.get(java.util.Calendar.MINUTE);
+        return nightFrom < nightTo ? now >= nightFrom && now < nightTo : now >= nightFrom || now < nightTo;
     }
 
     // ------------------------------------------------------------------ themes

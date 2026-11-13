@@ -37,7 +37,8 @@ import java.util.List;
 
 /** Home screen: the bookshelf, with a search box that leads into the browser. */
 public class ShelfActivity extends Activity implements Events.Listener {
-    private static final int REQ_EXPORT = 11;
+    private static final int REQ_EXPORT = 11, REQ_IMPORT = 12, REQ_BACKUP = 13, REQ_RESTORE = 14;
+    private boolean backupWithText;
     private static final long AUTO_CHECK_INTERVAL = 2 * 3600 * 1000L;
     private static final String[] ORDERS = {
             "pinned DESC, lastReadAt DESC", "pinned DESC, addedAt DESC",
@@ -125,6 +126,200 @@ public class ShelfActivity extends Activity implements Events.Listener {
                 .addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)));
         findViewById(R.id.btnMenu).setOnClickListener(this::showMenu);
         Events.add(this);
+        if (savedInstanceState == null) openFile(getIntent());
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        openFile(intent);
+    }
+
+    /** A text file or EPUB handed over by a file manager. */
+    private void openFile(Intent intent) {
+        if (intent != null && Intent.ACTION_VIEW.equals(intent.getAction()) && intent.getData() != null) importBook(intent.getData());
+    }
+
+    private void importBook(final Uri uri) {
+        status.setText(R.string.sh_importing);
+        status.setVisibility(View.VISIBLE);
+        App.IO.execute(() -> {
+            long id = -1;
+            String error = null;
+            try {
+                id = com.rc.novelreader.data.LocalBooks.importFile(this, uri);
+            } catch (Throwable t) {
+                error = t.getMessage() == null ? t.toString() : t.getMessage();
+            }
+            final long book = id;
+            final String err = error;
+            App.MAIN.post(() -> {
+                if (isDestroyed()) return;
+                status.setVisibility(View.GONE);
+                if (book < 0) App.toast(getString(R.string.sh_import_failed, err));
+                else {
+                    reload();
+                    ReaderActivity.start(this, book, -1);
+                }
+            });
+        });
+    }
+
+    private void pick(int request, String type) {
+        try {
+            startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE).setType(type), request);
+        } catch (RuntimeException e) {
+            App.toast(String.valueOf(e.getMessage()));
+        }
+    }
+
+    // ------------------------------------------------------------------ backup
+
+    private void backupMenu() {
+        String[] items = {getString(R.string.sh_backup_save), getString(R.string.sh_backup_save_text),
+                getString(R.string.sh_backup_restore), getString(R.string.sh_dav_upload), getString(R.string.sh_dav_download),
+                getString(R.string.sh_dav_settings)};
+        new AlertDialog.Builder(this).setTitle(R.string.sh_backup).setItems(items, (d, w) -> {
+            if (w == 0 || w == 1) {
+                backupWithText = w == 1;
+                try {
+                    startActivityForResult(new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                            .setType("application/zip").putExtra(Intent.EXTRA_TITLE, com.rc.novelreader.data.Backup.FILE_NAME), REQ_BACKUP);
+                } catch (RuntimeException e) {
+                    App.toast(String.valueOf(e.getMessage()));
+                }
+            } else if (w == 2) pick(REQ_RESTORE, "*/*");
+            else if (w == 3) davUpload();
+            else if (w == 4) confirmRestore(null);
+            else davSettings();
+        }).show();
+    }
+
+    private void busy(int text) {
+        status.setText(text);
+        status.setVisibility(View.VISIBLE);
+    }
+
+    private void done(final String message) {
+        App.MAIN.post(() -> {
+            if (isDestroyed()) return;
+            status.setVisibility(View.GONE);
+            App.toast(message);
+            reload();
+        });
+    }
+
+    private void davSettings() {
+        android.widget.LinearLayout col = new android.widget.LinearLayout(this);
+        col.setOrientation(android.widget.LinearLayout.VERTICAL);
+        col.setPadding(App.dp(22), App.dp(10), App.dp(22), 0);
+        final EditText url = new EditText(this), user = new EditText(this), pass = new EditText(this);
+        url.setHint(R.string.sh_dav_url);
+        url.setSingleLine(true);
+        url.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
+        url.setText(App.prefs().getString("webdav_url", ""));
+        user.setHint(R.string.sh_dav_user);
+        user.setSingleLine(true);
+        user.setText(App.prefs().getString("webdav_user", ""));
+        pass.setHint(R.string.sh_dav_pass);
+        pass.setSingleLine(true);
+        pass.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        pass.setText(App.prefs().getString("webdav_pass", ""));
+        col.addView(url);
+        col.addView(user);
+        col.addView(pass);
+        TextView note = new TextView(this);
+        note.setText(R.string.sh_dav_note);
+        note.setTextSize(12.5f);
+        note.setPadding(0, App.dp(8), 0, 0);
+        col.addView(note);
+        new AlertDialog.Builder(this).setTitle(R.string.sh_dav_settings).setView(col).setNegativeButton(R.string.cancel, null)
+                .setPositiveButton(R.string.save, (d, w) -> App.prefs().edit()
+                        .putString("webdav_url", url.getText().toString().trim())
+                        .putString("webdav_user", user.getText().toString().trim())
+                        .putString("webdav_pass", pass.getText().toString()).apply()).show();
+    }
+
+    private boolean davReady() {
+        if (!App.prefs().getString("webdav_url", "").isEmpty()) return true;
+        davSettings();
+        return false;
+    }
+
+    private void davUpload() {
+        if (!davReady()) return;
+        busy(R.string.sh_backup_working);
+        App.IO.execute(() -> {
+            java.io.File tmp = new java.io.File(getCacheDir(), "backup-upload.zip");
+            try {
+                try (OutputStream out = new java.io.FileOutputStream(tmp)) {
+                    com.rc.novelreader.data.Backup.write(this, out, false);
+                }
+                com.rc.novelreader.data.Backup.upload(App.prefs().getString("webdav_url", ""), App.prefs().getString("webdav_user", ""),
+                        App.prefs().getString("webdav_pass", ""), tmp);
+                done(getString(R.string.sh_backup_done));
+            } catch (Throwable t) {
+                done(getString(R.string.sh_backup_failed, String.valueOf(t.getMessage())));
+            } finally {
+                tmp.delete();
+            }
+        });
+    }
+
+    /** @param file the backup to read, or null to fetch it from the WebDAV folder */
+    private void confirmRestore(final Uri file) {
+        if (file == null && !davReady()) return;
+        new AlertDialog.Builder(this).setTitle(R.string.sh_backup_restore).setMessage(R.string.sh_restore_warning)
+                .setNegativeButton(R.string.cancel, null)
+                .setPositiveButton(R.string.ok, (d, w) -> {
+                    busy(R.string.sh_backup_working);
+                    App.IO.execute(() -> {
+                        java.io.File tmp = new java.io.File(getCacheDir(), "backup-download.zip");
+                        try {
+                            if (file == null) {
+                                com.rc.novelreader.data.Backup.download(App.prefs().getString("webdav_url", ""),
+                                        App.prefs().getString("webdav_user", ""), App.prefs().getString("webdav_pass", ""), tmp);
+                                try (java.io.InputStream in = new java.io.FileInputStream(tmp)) {
+                                    com.rc.novelreader.data.Backup.restore(this, in);
+                                }
+                            } else {
+                                try (java.io.InputStream in = getContentResolver().openInputStream(file)) {
+                                    if (in == null) throw new java.io.IOException("cannot open file");
+                                    com.rc.novelreader.data.Backup.restore(this, in);
+                                }
+                            }
+                            App.MAIN.post(this::restored);
+                        } catch (Throwable t) {
+                            done(getString(R.string.sh_backup_failed, String.valueOf(t.getMessage())));
+                        } finally {
+                            tmp.delete();
+                        }
+                    });
+                }).show();
+    }
+
+    /** Everything in memory is stale now: the app has to start again. */
+    private void restored() {
+        new AlertDialog.Builder(this).setMessage(R.string.sh_restore_done).setCancelable(false)
+                .setPositiveButton(R.string.ok, (d, w) -> {
+                    finishAffinity();
+                    Runtime.getRuntime().exit(0);
+                }).show();
+    }
+
+    private void showStats() {
+        long[] days = com.rc.novelreader.reader.Stats.lastDays(7);
+        StringBuilder sb = new StringBuilder();
+        sb.append(getString(R.string.rt_stat_today)).append("  ").append(getString(R.string.rd_minutes, (int) (days[6] / 60000))).append('\n');
+        long week = 0;
+        for (long v : days) week += v;
+        sb.append(getString(R.string.sh_stat_week)).append("  ").append(getString(R.string.rd_minutes, (int) (week / 60000))).append('\n');
+        sb.append(getString(R.string.rt_stat_streak)).append("  ").append(getString(R.string.rt_days, com.rc.novelreader.reader.Stats.streak())).append('\n');
+        long total = com.rc.novelreader.reader.Stats.totalMs() / 60000;
+        sb.append(getString(R.string.rt_stat_total)).append("  ").append(getString(R.string.rt_hours_minutes, (int) (total / 60), (int) (total % 60)));
+        int speed = com.rc.novelreader.reader.Stats.speed();
+        if (speed > 0) sb.append('\n').append(getString(R.string.rt_stat_speed)).append("  ").append(getString(R.string.rt_per_minute, speed));
+        new AlertDialog.Builder(this).setTitle(R.string.rt_stats).setMessage(sb.toString()).setPositiveButton(R.string.ok, null).show();
     }
 
     /**
@@ -198,7 +393,10 @@ public class ShelfActivity extends Activity implements Events.Listener {
         sm.setGroupCheckable(1, true, true);
         m.getMenu().add(0, 3, 1, R.string.bookmarks);
         m.getMenu().add(0, 1, 1, R.string.history);
-        m.getMenu().add(0, 2, 2, R.string.settings);
+        m.getMenu().add(0, 4, 2, R.string.sh_import);
+        m.getMenu().add(0, 6, 2, R.string.rt_stats);
+        m.getMenu().add(0, 5, 2, R.string.sh_backup);
+        m.getMenu().add(0, 2, 3, R.string.settings);
         m.setOnMenuItemClickListener(item -> {
             int id = item.getItemId();
             if (id >= 100) {
@@ -207,67 +405,63 @@ public class ShelfActivity extends Activity implements Events.Listener {
             } else if (id == 1) LibraryActivity.open(this, 1);
             else if (id == 3) LibraryActivity.open(this, 0);
             else if (id == 2) startActivity(new Intent(this, SettingsActivity.class));
+            else if (id == 4) pick(REQ_IMPORT, "*/*");
+            else if (id == 5) backupMenu();
+            else if (id == 6) showStats();
             return true;
         });
         m.show();
     }
 
     private void showBookMenu(final Book b) {
-        final String[] items = {
-                getString(R.string.book_info),
-                getString(b.pinned ? R.string.unpin : R.string.pin),
-                getString(R.string.cache_all),
-                getString(R.string.clear_cache),
-                getString(R.string.export_txt),
-                getString(R.string.open_source_page),
-                getString(R.string.remove_book)};
-        new AlertDialog.Builder(this).setTitle(b.title).setItems(items, (d, which) -> {
-            switch (which) {
-                case 0:
-                    BookSheet.show(this, b.id);
-                    break;
-                case 1:
-                    b.pinned = !b.pinned;
-                    android.content.ContentValues v = new android.content.ContentValues();
-                    v.put("pinned", b.pinned ? 1 : 0);
-                    Db.updateBook(b.id, v);
-                    reload();
-                    break;
-                case 2:
-                    askNotifications();
-                    DownloadService.start(this, b.id, 0, -1);
-                    break;
-                case 3:
-                    App.IO.execute(() -> {
-                        Library.clearCache(b.id);
-                        App.toast(getString(R.string.cache_cleared));
-                    });
-                    break;
-                case 4:
-                    exportBookId = b.id;
-                    Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
-                            .setType("text/plain").putExtra(Intent.EXTRA_TITLE, b.title + ".txt");
-                    try {
-                        startActivityForResult(i, REQ_EXPORT);
-                    } catch (Exception e) {
-                        App.toast(getString(R.string.export_failed, String.valueOf(e.getMessage())));
-                    }
-                    break;
-                case 5:
-                    BrowserActivity.open(this, b.detailUrl);
-                    break;
-                case 6:
-                    new AlertDialog.Builder(this).setMessage(getString(R.string.remove_confirm, b.title))
-                            .setPositiveButton(R.string.ok, (dd, w) -> App.IO.execute(() -> {
-                                Library.deleteBook(b.id);
-                                App.toast(getString(R.string.removed));
-                            }))
-                            .setNegativeButton(R.string.cancel, null).show();
-                    break;
-                default:
-                    break;
+        final List<String> labels = new ArrayList<>();
+        final List<Runnable> acts = new ArrayList<>();
+        labels.add(getString(R.string.book_info));
+        acts.add(() -> BookSheet.show(this, b.id));
+        labels.add(getString(b.pinned ? R.string.unpin : R.string.pin));
+        acts.add(() -> {
+            b.pinned = !b.pinned;
+            android.content.ContentValues v = new android.content.ContentValues();
+            v.put("pinned", b.pinned ? 1 : 0);
+            Db.updateBook(b.id, v);
+            reload();
+        });
+        // an imported book is its own cache and has no page on the web
+        if (!b.local()) {
+            labels.add(getString(R.string.cache_all));
+            acts.add(() -> {
+                askNotifications();
+                DownloadService.start(this, b.id, 0, -1);
+            });
+            labels.add(getString(R.string.clear_cache));
+            acts.add(() -> App.IO.execute(() -> {
+                Library.clearCache(b.id);
+                App.toast(getString(R.string.cache_cleared));
+            }));
+        }
+        labels.add(getString(R.string.export_txt));
+        acts.add(() -> {
+            exportBookId = b.id;
+            Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                    .setType("text/plain").putExtra(Intent.EXTRA_TITLE, b.title + ".txt");
+            try {
+                startActivityForResult(i, REQ_EXPORT);
+            } catch (Exception e) {
+                App.toast(getString(R.string.export_failed, String.valueOf(e.getMessage())));
             }
-        }).show();
+        });
+        if (!b.local()) {
+            labels.add(getString(R.string.open_source_page));
+            acts.add(() -> BrowserActivity.open(this, b.detailUrl));
+        }
+        labels.add(getString(R.string.remove_book));
+        acts.add(() -> new AlertDialog.Builder(this).setMessage(getString(R.string.remove_confirm, b.title))
+                .setPositiveButton(R.string.ok, (dd, w) -> App.IO.execute(() -> {
+                    Library.deleteBook(b.id);
+                    App.toast(getString(R.string.removed));
+                }))
+                .setNegativeButton(R.string.cancel, null).show());
+        new AlertDialog.Builder(this).setTitle(b.title).setItems(labels.toArray(new String[0]), (d, which) -> acts.get(which).run()).show();
     }
 
     private void askNotifications() {
@@ -279,8 +473,32 @@ public class ShelfActivity extends Activity implements Events.Listener {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode != REQ_EXPORT || resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         final Uri uri = data.getData();
+        if (requestCode == REQ_IMPORT) {
+            importBook(uri);
+            return;
+        }
+        if (requestCode == REQ_RESTORE) {
+            confirmRestore(uri);
+            return;
+        }
+        if (requestCode == REQ_BACKUP) {
+            busy(R.string.sh_backup_working);
+            final boolean withText = backupWithText;
+            App.IO.execute(() -> {
+                try {
+                    OutputStream out = getContentResolver().openOutputStream(uri);
+                    if (out == null) throw new java.io.IOException("cannot open file");
+                    com.rc.novelreader.data.Backup.write(this, out, withText);
+                    done(getString(R.string.sh_backup_done));
+                } catch (Throwable t) {
+                    done(getString(R.string.sh_backup_failed, String.valueOf(t.getMessage())));
+                }
+            });
+            return;
+        }
+        if (requestCode != REQ_EXPORT) return;
         final long id = exportBookId;
         App.IO.execute(() -> {
             try {

@@ -43,7 +43,7 @@ public final class Library {
         return new File(App.I.getFilesDir(), "books/" + bookId);
     }
 
-    private static File file(long bookId, long chapterId) {
+    static File file(long bookId, long chapterId) {
         return new File(dir(bookId), chapterId + ".txt");
     }
 
@@ -56,7 +56,7 @@ public final class Library {
         }
     }
 
-    private static void write(File f, String text) throws IOException {
+    static void write(File f, String text) throws IOException {
         File d = f.getParentFile();
         if (d != null && !d.exists() && !d.mkdirs() && !d.exists()) throw new IOException("Cannot create " + d);
         File tmp = new File(f.getPath() + ".tmp");
@@ -389,7 +389,8 @@ public final class Library {
     /** Returns the chapter text, downloading and caching it when needed (merging paginated chapters). */
     public static String loadChapter(Book b, Chapter c, boolean force) throws IOException {
         File f = file(b.id, c.id);
-        if (!force && f.exists()) return read(f);
+        if ((!force || b.local()) && f.exists()) return read(f);
+        if (b.local()) throw new IOException("The text of this imported book is missing");
 
         StringBuilder text = new StringBuilder();
         String title = null, url = c.url, referer = Texts.or(b.tocUrl, b.detailUrl), nextChapter = null;
@@ -460,6 +461,9 @@ public final class Library {
     }
 
     public static void clearCache(long bookId) {
+        Book b = Db.book(bookId);
+        // an imported book has no source to fetch the text from again
+        if (b != null && b.local()) return;
         Db.get().execSQL("UPDATE chapters SET cached=0 WHERE bookId=?", new Object[]{bookId});
         deleteDir(dir(bookId));
         Events.post(Events.CACHE, bookId);

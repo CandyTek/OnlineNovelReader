@@ -53,6 +53,7 @@ final class ReaderSheets {
     }
 
     private final ReaderActivity a;
+    ReaderTools tools;
     /** Receives the path of the picture the user picked for a theme. */
     private Text pendingImage;
 
@@ -62,24 +63,24 @@ final class ReaderSheets {
 
     // ------------------------------------------------------------------ building blocks
 
-    private AlertDialog.Builder dlg(int title) {
+    AlertDialog.Builder dlg(int title) {
         return new AlertDialog.Builder(a).setTitle(title);
     }
 
-    private LinearLayout column() {
+    LinearLayout column() {
         LinearLayout col = new LinearLayout(a);
         col.setOrientation(LinearLayout.VERTICAL);
         col.setPadding(App.dp(22), App.dp(10), App.dp(22), App.dp(6));
         return col;
     }
 
-    private View scroll(View v) {
+    View scroll(View v) {
         ScrollView s = new ScrollView(a);
         s.addView(v);
         return s;
     }
 
-    private TextView chip(String text) {
+    TextView chip(String text) {
         TextView t = new TextView(a);
         t.setText(text);
         t.setGravity(Gravity.CENTER);
@@ -91,7 +92,7 @@ final class ReaderSheets {
         return t;
     }
 
-    private TextView note(LinearLayout col, int text) {
+    TextView note(LinearLayout col, int text) {
         TextView t = new TextView(a);
         t.setText(text);
         t.setTextSize(12.5f);
@@ -102,7 +103,7 @@ final class ReaderSheets {
     }
 
     /** "label   − value +"; zero is the word for 0 when 0 means "off". */
-    private void stepper(LinearLayout col, int label, final int min, final int max, final int step,
+    void stepper(LinearLayout col, int label, final int min, final int max, final int step,
                          final Get get, final Set set, final String unit, final String zero) {
         LinearLayout row = new LinearLayout(a);
         row.setGravity(Gravity.CENTER_VERTICAL);
@@ -131,7 +132,7 @@ final class ReaderSheets {
         col.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, App.dp(48)));
     }
 
-    private void toggle(LinearLayout col, int label, boolean on, final Set set) {
+    void toggle(LinearLayout col, int label, boolean on, final Set set) {
         Switch s = new Switch(a);
         s.setText(label);
         s.setTextSize(14);
@@ -140,7 +141,7 @@ final class ReaderSheets {
         col.addView(s, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, App.dp(48)));
     }
 
-    private void number(int title, int initial, final int min, final int max, final Set done) {
+    void number(int title, int initial, final int min, final int max, final Set done) {
         final EditText e = new EditText(a);
         e.setInputType(InputType.TYPE_CLASS_NUMBER);
         e.setText(String.valueOf(initial));
@@ -155,56 +156,135 @@ final class ReaderSheets {
         }).show();
     }
 
-    private String minutes(int n) {
+    String minutes(int n) {
         return a.getString(R.string.rd_minutes, n);
     }
 
-    private String onOff(boolean on) {
+    String onOff(boolean on) {
         return a.getString(on ? R.string.rd_on : R.string.rd_off);
     }
 
     // ------------------------------------------------------------------ the "More" list
 
+    private void menu(int title, final List<String> labels, final List<Runnable> acts) {
+        dlg(title).setItems(labels.toArray(new String[0]), (d, w) -> acts.get(w).run()).show();
+    }
+
+    private String state(int label, String value) {
+        return a.getString(label) + " · " + value;
+    }
+
     void more() {
         final List<String> labels = new ArrayList<>();
         final List<Runnable> acts = new ArrayList<>();
-        labels.add(a.getString(R.string.cache));
-        acts.add(a::cacheMenu);
+        if (!a.book.local()) {
+            labels.add(a.getString(R.string.cache));
+            acts.add(a::cacheMenu);
+        }
         labels.add(a.getString(R.string.rd_bookmark_add));
         acts.add(this::addBookmark);
         labels.add(a.getString(R.string.bookmarks));
         acts.add(this::bookmarks);
+        labels.add(a.getString(R.string.rt_notes));
+        acts.add(tools::notesList);
         labels.add(a.getString(R.string.rd_search));
         acts.add(this::search);
         labels.add(a.getString(R.string.rd_auto_page));
         acts.add(this::autoPage);
-        labels.add(a.getString(R.string.rd_tap_zones));
-        acts.add(this::zones);
+        labels.add(a.getString(R.string.rt_speed_read));
+        acts.add(tools::speedRead);
+        labels.add(a.getString(R.string.rt_stats));
+        acts.add(tools::stats);
+        labels.add(a.getString(R.string.rt_vocab));
+        acts.add(tools::vocab);
+        labels.add(a.getString(R.string.rt_ai));
+        acts.add(tools::ai);
+        labels.add(a.getString(R.string.rt_group_look));
+        acts.add(this::appearance);
+        labels.add(a.getString(R.string.rt_group_controls));
+        acts.add(this::controls);
+        labels.add(a.getString(R.string.rt_group_text));
+        acts.add(this::textOptions);
+        menu(R.string.more, labels, acts);
+    }
+
+    private void appearance() {
+        final List<String> labels = new ArrayList<>();
+        final List<Runnable> acts = new ArrayList<>();
         labels.add(a.getString(R.string.font));
         acts.add(this::fonts);
         labels.add(a.getString(R.string.rd_new_theme));
         acts.add(() -> editTheme(null));
         labels.add(a.getString(R.string.page_layout));
         acts.add(this::layout);
-        labels.add(a.getString(R.string.rd_screen_on) + " · " + screenLabel(ReaderPrefs.screenMin));
+        labels.add(state(R.string.rt_two_page, onOff(ReaderPrefs.twoPage)));
+        acts.add(() -> {
+            ReaderPrefs.twoPage = !ReaderPrefs.twoPage;
+            a.changed();
+            App.toast(state(R.string.rt_two_page, onOff(ReaderPrefs.twoPage)));
+        });
+        labels.add(state(R.string.rt_ruler, onOff(ReaderPrefs.ruler)));
+        acts.add(() -> {
+            ReaderPrefs.ruler = !ReaderPrefs.ruler;
+            a.changed();
+            App.toast(a.getString(ReaderPrefs.ruler ? R.string.rt_ruler_tip : R.string.rt_ruler) + (ReaderPrefs.ruler ? "" : " · " + onOff(false)));
+        });
+        labels.add(state(R.string.rd_eye, ReaderPrefs.eye == 0 ? onOff(false) : ReaderPrefs.eye + "%"));
+        acts.add(this::eye);
+        labels.add(state(R.string.rt_night_schedule, ReaderPrefs.nightFrom < 0 ? onOff(false)
+                : ReaderTools.clock(ReaderPrefs.nightFrom) + " - " + ReaderTools.clock(ReaderPrefs.nightTo)));
+        acts.add(tools::nightSchedule);
+        labels.add(a.getString(R.string.rd_orientation));
+        acts.add(this::orientation);
+        menu(R.string.rt_group_look, labels, acts);
+    }
+
+    private void controls() {
+        final List<String> labels = new ArrayList<>();
+        final List<Runnable> acts = new ArrayList<>();
+        labels.add(a.getString(R.string.rd_tap_zones));
+        acts.add(this::zones);
+        labels.add(a.getString(R.string.rt_gestures));
+        acts.add(tools::gestures);
+        labels.add(state(R.string.rd_screen_on, screenLabel(ReaderPrefs.screenMin)));
         acts.add(this::screenOn);
-        labels.add(a.getString(R.string.rd_rest) + " · "
-                + (ReaderPrefs.restEvery == 0 ? onOff(false) : minutes(ReaderPrefs.restEvery)));
+        labels.add(state(R.string.rd_rest, ReaderPrefs.restEvery == 0 ? onOff(false) : minutes(ReaderPrefs.restEvery)));
         acts.add(this::rest);
-        labels.add(a.getString(R.string.rd_filler) + " · " + onOff(ReaderPrefs.filler));
+        labels.add(state(R.string.rt_shake, onOff(ReaderPrefs.shake)));
+        acts.add(() -> {
+            ReaderPrefs.shake = !ReaderPrefs.shake;
+            a.changed();
+            App.toast(state(R.string.rt_shake, onOff(ReaderPrefs.shake)));
+        });
+        menu(R.string.rt_group_controls, labels, acts);
+    }
+
+    private void textOptions() {
+        final List<String> labels = new ArrayList<>();
+        final List<Runnable> acts = new ArrayList<>();
+        labels.add(state(R.string.rd_filler, onOff(ReaderPrefs.filler)));
         acts.add(() -> {
             ReaderPrefs.filler = !ReaderPrefs.filler;
             ReaderPrefs.save();
             a.reprocess();
-            App.toast(a.getString(R.string.rd_filler) + " · " + onOff(ReaderPrefs.filler));
+            App.toast(state(R.string.rd_filler, onOff(ReaderPrefs.filler)));
         });
         labels.add(a.getString(R.string.rd_replacements));
         acts.add(this::replacements);
-        labels.add(a.getString(R.string.rd_orientation));
-        acts.add(this::orientation);
-        labels.add(a.getString(R.string.rd_eye) + " · " + (ReaderPrefs.eye == 0 ? onOff(false) : ReaderPrefs.eye + "%"));
-        acts.add(this::eye);
-        dlg(R.string.more).setItems(labels.toArray(new String[0]), (d, w) -> acts.get(w).run()).show();
+        labels.add(state(R.string.rt_convert, a.getString(ReaderPrefs.convert == 1 ? R.string.rt_to_traditional
+                : ReaderPrefs.convert == 2 ? R.string.rt_to_simplified : R.string.rd_off)));
+        acts.add(tools::convert);
+        labels.add(state(R.string.rt_voice_online, onOff(ReaderPrefs.ttsOnline)));
+        acts.add(tools::onlineVoice);
+        menu(R.string.rt_group_text, labels, acts);
+    }
+
+    void voiceMenu() {
+        String[] items = {a.getString(R.string.rt_voice_system), state(R.string.rt_voice_online, onOff(ReaderPrefs.ttsOnline))};
+        dlg(R.string.rd_voice).setItems(items, (d, w) -> {
+            if (w == 0) Speaker.openSystemSettings(a);
+            else tools.onlineVoice();
+        }).show();
     }
 
     // ------------------------------------------------------------------ bookmarks
@@ -335,6 +415,8 @@ final class ReaderSheets {
         LinearLayout col = column();
         stepper(col, R.string.rd_auto_interval, 2, 120, 1, () -> ReaderPrefs.autoSec, v -> ReaderPrefs.autoSec = v,
                 " s", null);
+        stepper(col, R.string.rt_auto_speed, 4, 300, 4, () -> ReaderPrefs.autoSpeed, v -> ReaderPrefs.autoSpeed = v, "", null);
+        note(col, R.string.rt_auto_speed_note);
         note(col, R.string.rd_auto_note);
         dlg(R.string.rd_auto_page).setView(col).setNegativeButton(R.string.cancel, null)
                 .setPositiveButton(R.string.rd_start, (d, w) -> {
@@ -346,14 +428,13 @@ final class ReaderSheets {
     // ------------------------------------------------------------------ tap zones
 
     void zones() {
-        final int[] names = {R.string.rd_zone_menu, R.string.rd_zone_prev, R.string.rd_zone_next, R.string.rd_zone_none};
         final int[] z = ReaderPrefs.zones.clone();
         LinearLayout col = column();
         note(col, R.string.rd_zones_note);
         final TextView[] cells = new TextView[9];
         final Runnable show = () -> {
             for (int i = 0; i < 9; i++) {
-                cells[i].setText(names[z[i]]);
+                cells[i].setText(tools.actionName(z[i]));
                 cells[i].setSelected(z[i] == ReaderPrefs.Z_MENU);
             }
         };
@@ -365,10 +446,10 @@ final class ReaderSheets {
                 LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, App.dp(72), 1);
                 lp.setMargins(App.dp(3), App.dp(3), App.dp(3), App.dp(3));
                 row.addView(cells[i], lp);
-                cells[i].setOnClickListener(v -> {
-                    z[i] = (z[i] + 1) % 4;
+                cells[i].setOnClickListener(v -> tools.pickAction(R.string.rd_tap_zones, z[i], act -> {
+                    z[i] = act;
                     show.run();
-                });
+                }));
             }
             col.addView(row);
         }
@@ -443,7 +524,7 @@ final class ReaderSheets {
         if (keys.size() > 3) App.toast(a.getString(R.string.rd_hold_to_delete));
     }
 
-    private static String nameOf(ReaderActivity a, Uri uri, String fallback) {
+    static String nameOf(ReaderActivity a, Uri uri, String fallback) {
         try (android.database.Cursor c = a.getContentResolver().query(uri, null, null, null, null)) {
             if (c != null && c.moveToFirst()) {
                 int i = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
@@ -454,7 +535,7 @@ final class ReaderSheets {
         return fallback;
     }
 
-    private static void copy(ReaderActivity a, Uri from, File to) throws java.io.IOException {
+    static void copy(ReaderActivity a, Uri from, File to) throws java.io.IOException {
         try (InputStream in = a.getContentResolver().openInputStream(from); OutputStream out = new FileOutputStream(to)) {
             if (in == null) throw new java.io.IOException("unreadable");
             byte[] buf = new byte[65536];
@@ -843,7 +924,7 @@ final class ReaderSheets {
 
     // ------------------------------------------------------------------ replacements
 
-    private String shortened(String s) {
+    String shortened(String s) {
         s = s.replace('\n', ' ');
         return s.length() > 24 ? s.substring(0, 24) + "…" : s;
     }

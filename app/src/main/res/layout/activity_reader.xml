@@ -265,6 +265,7 @@
             <TextView style="@style/ReaderLabel" android:text="@string/page_turn" />
             <TextView android:id="@+id/modeCover" style="@style/ReaderChip" android:text="@string/mode_cover" />
             <TextView android:id="@+id/modeSlide" style="@style/ReaderChip" android:text="@string/mode_slide" />
+            <TextView android:id="@+id/modeCurl" style="@style/ReaderChip" android:text="@string/rt_mode_curl" />
             <TextView android:id="@+id/modeNone" style="@style/ReaderChip" android:text="@string/mode_none" />
             <TextView android:id="@+id/modeScroll" style="@style/ReaderChip" android:text="@string/mode_scroll" />
         </LinearLayout>

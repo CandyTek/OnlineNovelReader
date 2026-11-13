@@ -51,6 +51,15 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
     PageView page;
     private ReaderSheets sheets;
+    ReaderTools tools;
+    Notes notes;
+    /** Highlights per chapter id as the page view wants them; dropped whenever text or notes change. */
+    private final java.util.HashMap<Long, int[]> noteRanges = new java.util.HashMap<>();
+    private long lastTouch, pendingChars;
+    private int statIdx = -1, statOffset;
+    private float brightAcc;
+    private android.hardware.SensorManager sensors;
+    private long lastShake;
     private Speaker speaker;
     private final com.rc.novelreader.sniff.FillerFilter filler = new com.rc.novelreader.sniff.FillerFilter();
     private List<ReaderPrefs.Theme> themeList = new ArrayList<>();
@@ -118,6 +127,9 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         page.setLoadingText(getString(R.string.loading));
         page.applyPrefs();
         sheets = new ReaderSheets(this);
+        tools = new ReaderTools(this, sheets);
+        sheets.tools = tools;
+        notes = new Notes(bookId);
         speaker = new Speaker(this, speechHost);
         restUntil = App.prefs().getLong("r_rest_until", 0);
         buildOverlays();
@@ -185,11 +197,17 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         App.MAIN.removeCallbacks(restTick);
         restTick.run();
         keepAwake();
+        lastTouch = now;
+        applySchedule(false);
+        listenForShake(ReaderPrefs.shake);
     }
 
     @Override
     protected void onPause() {
         saveProgress();
+        ReaderPrefs.save();
+        Stats.flush();
+        listenForShake(false);
         lastSeen = System.currentTimeMillis();
         App.MAIN.removeCallbacks(restTick);
         App.MAIN.removeCallbacks(screenOff);
@@ -230,6 +248,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         @Override
         public void onReceive(Context c, Intent i) {
             page.invalidate();
+            applySchedule(false);
         }
     };
 
@@ -242,7 +261,13 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
     @Override
     public String chapterTitle(int idx) {
-        return idx >= 0 && idx < chapters.size() ? chapters.get(idx).displayTitle() : "";
+        return idx >= 0 && idx < chapters.size() ? titleOf(chapters.get(idx)) : "";
+    }
+
+    /** The chapter's heading as shown (script conversion applies to it too). */
+    String titleOf(Chapter c) {
+        String t = c.displayTitle();
+        return ReaderPrefs.convert == 0 ? t : ReaderTools.hanzi().convert(t, ReaderPrefs.convert);
     }
 
     @Override
@@ -282,11 +307,12 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             boolean current = opened && c.idx == page.currentIdx();
             if (text != null) {
                 c.cached = true;
-                page.setChapter(c.idx, c.displayTitle(), text);
+                noteRanges.remove(c.id);
+                page.setChapter(c.idx, titleOf(c), text);
                 if (current && speaker.active() && (speaker.waiting() || speakFollow)) {
                     int from = speaker.waiting() ? 0 : page.currentOffset();
                     speakFollow = false;
-                    speaker.speak(c.idx, c.displayTitle(), text, from);
+                    speaker.speak(c.idx, titleOf(c), text, from);
                 }
             } else {
                 page.setError(c.idx, getString(R.string.load_failed, error == null ? "" : error));
@@ -304,6 +330,10 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
     @Override
     public void onPosition(int idx, int pg, int pages, int offset) {
+        // text passed since the last position, for the statistics; jumps are not reading
+        if (idx == statIdx && offset > statOffset && offset - statOffset < 4000) pendingChars += offset - statOffset;
+        statIdx = idx;
+        statOffset = offset;
         if (seek.getProgress() != idx && !seekTracking) seek.setProgress(idx);
         if (idx != lastSavedIdx) {
             lastSavedIdx = idx;
@@ -359,6 +389,106 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     }
 
     @Override
+    public void onAction(int action) {
+        switch (action) {
+            case ReaderPrefs.A_PREV_CHAPTER:
+                if (page.currentIdx() > 0) jumpTo(page.currentIdx() - 1);
+                else App.toast(getString(R.string.first_chapter));
+                break;
+            case ReaderPrefs.A_NEXT_CHAPTER:
+                if (page.currentIdx() + 1 < chapters.size()) jumpTo(page.currentIdx() + 1);
+                else onEdge(true);
+                break;
+            case ReaderPrefs.A_CONTENTS:
+                if (!menuVisible()) toggleMenu();
+                showToc();
+                break;
+            case ReaderPrefs.A_NIGHT:
+                switchNight();
+                break;
+            case ReaderPrefs.A_BOOKMARK:
+                sheets.addBookmark();
+                break;
+            case ReaderPrefs.A_SPEAK:
+                toggleSpeech();
+                break;
+            case ReaderPrefs.A_AUTO:
+                if (autoOn) stopAuto();
+                else startAuto();
+                break;
+            case ReaderPrefs.A_SEARCH:
+                sheets.search();
+                break;
+            case ReaderPrefs.A_BACK:
+                onBackPressed();
+                break;
+            default:
+                break;
+        }
+    }
+
+    private void toggleSpeech() {
+        if (!speaker.active()) startSpeech(page.currentOffset());
+        else if (speaker.paused()) speaker.resume();
+        else speaker.pause();
+    }
+
+    private void switchNight() {
+        ReaderPrefs.toggleNight();
+        ReaderPrefs.save();
+        page.applyPrefs();
+        btnNight.setText(ReaderPrefs.isNight() ? R.string.day : R.string.night);
+        bindDisplayPanel();
+    }
+
+    @Override
+    public void onBrightnessDrag(float delta) {
+        if (ReaderPrefs.brightness < 0) {
+            int sys = 128;
+            try {
+                sys = android.provider.Settings.System.getInt(getContentResolver(), android.provider.Settings.System.SCREEN_BRIGHTNESS);
+            } catch (Exception ignored) {
+            }
+            ReaderPrefs.brightness = Math.max(1, Math.min(100, sys * 100 / 255));
+            brightAcc = 0;
+        }
+        // the whole height of the screen is the whole range; saved when the reader is left
+        brightAcc += delta * 100;
+        int step = (int) brightAcc;
+        if (step == 0) return;
+        brightAcc -= step;
+        ReaderPrefs.brightness = Math.max(1, Math.min(100, ReaderPrefs.brightness + step));
+        applyWindowPrefs();
+        showTip(getString(R.string.brightness) + " " + ReaderPrefs.brightness + "%", 900);
+    }
+
+    @Override
+    public int[] notes(int idx) {
+        if (idx < 0 || idx >= chapters.size()) return null;
+        Chapter c = chapters.get(idx);
+        int[] r = noteRanges.get(c.id);
+        if (r == null) {
+            String text = memory.get(c.id);
+            if (text == null) return null;
+            r = notes.ranges(c.id, text);
+            noteRanges.put(c.id, r);
+        }
+        return r;
+    }
+
+    @Override
+    public void onNoteTap(int idx, int start) {
+        if (idx < 0 || idx >= chapters.size()) return;
+        Notes.Note n = notes.find(chapters.get(idx).id, start);
+        if (n != null) tools.editNote(n, false);
+    }
+
+    void notesChanged() {
+        noteRanges.clear();
+        page.invalidate();
+    }
+
+    @Override
     public boolean mayPreload(int idx) {
         if (idx < 0 || idx >= chapters.size()) return false;
         Chapter c = chapters.get(idx);
@@ -372,6 +502,9 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         int idx = opened ? page.currentIdx() : 0;
         sourceUrl.setText(idx < chapters.size() ? chapters.get(idx).url : book.detailUrl);
         btnShelf.setVisibility(book.inShelf ? View.GONE : View.VISIBLE);
+        // an imported book has no page to load again or to open
+        findViewById(R.id.btnReload).setVisibility(book.local() ? View.GONE : View.VISIBLE);
+        findViewById(R.id.btnWeb).setVisibility(book.local() ? View.GONE : View.VISIBLE);
         page.setShowPercent(!book.linked);
         seek.setEnabled(!book.linked || chapters.size() > 2);
     }
@@ -494,7 +627,8 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     String display(Chapter c, String raw) {
         if (raw == null) return null;
         String t = ReaderPrefs.filler ? filler.strip(c.id, raw) : raw;
-        return TextRules.apply(bookId, t);
+        t = TextRules.apply(bookId, t);
+        return ReaderPrefs.convert == 0 ? t : ReaderTools.hanzi().convert(t, ReaderPrefs.convert);
     }
 
     /** The text of a chapter as it is shown, null when it is not loaded. */
@@ -505,6 +639,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     /** The filter or the replacements changed: typeset the open chapter again. */
     void reprocess() {
         memory.evictAll();
+        noteRanges.clear();
         if (!opened) return;
         int idx = page.currentIdx(), off = page.currentOffset();
         if (speaker.active()) speaker.stop();
@@ -645,13 +780,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             }
         });
         findViewById(R.id.btnToc).setOnClickListener(v -> showToc());
-        btnNight.setOnClickListener(v -> {
-            ReaderPrefs.toggleNight();
-            ReaderPrefs.save();
-            page.applyPrefs();
-            btnNight.setText(ReaderPrefs.isNight() ? R.string.day : R.string.night);
-            bindDisplayPanel();
-        });
+        btnNight.setOnClickListener(v -> switchNight());
         findViewById(R.id.btnDisplay).setOnClickListener(v -> {
             topBar.setVisibility(View.GONE);
             bottomBar.setVisibility(View.GONE);
@@ -708,6 +837,43 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         page.applyPrefs();
         applyWindowPrefs();
         bindDisplayPanel();
+        listenForShake(ReaderPrefs.shake);
+    }
+
+    /**
+     * Night theme by the clock. Acts only when the schedule crosses a boundary (or was just edited), so a theme
+     * the reader picks by hand stays until the next boundary.
+     */
+    void applySchedule(boolean edited) {
+        if (ReaderPrefs.nightFrom < 0) return;
+        int want = ReaderPrefs.scheduledNight() ? 1 : 0;
+        if (!edited && App.prefs().getInt("r_sched_state", -1) == want) return;
+        App.prefs().edit().putInt("r_sched_state", want).apply();
+        if ((want == 1) != ReaderPrefs.isNight()) switchNight();
+    }
+
+    private final android.hardware.SensorEventListener shake = new android.hardware.SensorEventListener() {
+        @Override
+        public void onSensorChanged(android.hardware.SensorEvent e) {
+            float g = android.hardware.SensorManager.GRAVITY_EARTH;
+            double force = Math.sqrt(e.values[0] * e.values[0] + e.values[1] * e.values[1] + e.values[2] * e.values[2]) / g;
+            long now = System.currentTimeMillis();
+            if (force < 2.4 || now - lastShake < 1500 || resting()) return;
+            lastShake = now;
+            toggleSpeech();
+        }
+
+        @Override
+        public void onAccuracyChanged(android.hardware.Sensor s, int accuracy) {
+        }
+    };
+
+    private void listenForShake(boolean on) {
+        if (sensors == null) sensors = (android.hardware.SensorManager) getSystemService(SENSOR_SERVICE);
+        if (sensors == null) return;
+        sensors.unregisterListener(shake);
+        android.hardware.Sensor acc = sensors.getDefaultSensor(android.hardware.Sensor.TYPE_ACCELEROMETER);
+        if (on && acc != null) sensors.registerListener(shake, acc, android.hardware.SensorManager.SENSOR_DELAY_UI);
     }
 
     void themesChanged() {
@@ -733,13 +899,14 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     @Override
     public void onUserInteraction() {
         super.onUserInteraction();
+        lastTouch = System.currentTimeMillis();
         if (book != null) keepAwake();
     }
 
     private final Runnable autoTick = new Runnable() {
         @Override
         public void run() {
-            if (!autoOn) return;
+            if (!autoOn || ReaderPrefs.mode == PageView.SCROLL) return;
             if (!menuVisible() && !resting() && !page.hasSelection()) page.turn(true);
             App.MAIN.postDelayed(this, ReaderPrefs.autoSec * 1000L);
         }
@@ -750,14 +917,17 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         autoOn = true;
         keepAwake();
         App.MAIN.removeCallbacks(autoTick);
-        App.MAIN.postDelayed(autoTick, ReaderPrefs.autoSec * 1000L);
-        App.toast(getString(R.string.rd_auto_started));
+        // scroll mode moves the text steadily; the paged modes turn a page every so many seconds
+        if (ReaderPrefs.mode == PageView.SCROLL) page.setAutoScroll(App.dp(ReaderPrefs.autoSpeed));
+        else App.MAIN.postDelayed(autoTick, ReaderPrefs.autoSec * 1000L);
+        App.toast(getString(ReaderPrefs.mode == PageView.SCROLL ? R.string.rt_auto_scroll_started : R.string.rd_auto_started));
     }
 
     private void stopAuto() {
         if (!autoOn) return;
         autoOn = false;
         App.MAIN.removeCallbacks(autoTick);
+        page.setAutoScroll(0);
         keepAwake();
         App.toast(getString(R.string.rd_auto_stopped));
     }
@@ -770,6 +940,13 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         @Override
         public void run() {
             long now = System.currentTimeMillis();
+            // statistics: time in front of the text, not in a break, not listening, and not long after the last touch
+            long step = now - tickAt;
+            if (step > 0 && step < 5000 && !resting() && !(speaker.active() && !speaker.paused())
+                    && (autoOn || now - lastTouch < 180000)) {
+                Stats.add(bookId, step, pendingChars);
+                pendingChars = 0;
+            }
             if (restUntil > now) {
                 long left = (restUntil - now + 999) / 1000;
                 restText.setText(getString(R.string.rd_rest_now, String.format(java.util.Locale.US, "%d:%02d", left / 60, left % 60)));
@@ -850,21 +1027,29 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         eyeView.setVisibility(View.GONE);
         root.addView(eyeView, 1, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        // menu next to selected text
+        // menu next to selected text, two rows
         LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.VERTICAL);
         bar.setBackgroundResource(R.drawable.tip_bg);
         bar.setPadding(App.dp(4), 0, App.dp(4), 0);
-        int[] labels = {R.string.rd_copy, R.string.rd_replace, R.string.rd_hide, R.string.rd_paragraph, R.string.rd_speak_here, R.string.share};
+        int[] labels = {R.string.rd_copy, R.string.rt_highlight, R.string.rt_note, R.string.rt_lookup, R.string.rd_speak_here,
+                R.string.rd_replace, R.string.rd_hide, R.string.rd_paragraph, R.string.rt_translate, R.string.share};
+        LinearLayout line = null;
         for (int i = 0; i < labels.length; i++) {
+            if (i % 5 == 0) {
+                line = new LinearLayout(this);
+                bar.addView(line);
+            }
             final int which = i;
             TextView t = new TextView(this);
             t.setText(labels[i]);
             t.setTextSize(13.5f);
             t.setTextColor(0xFFFFFFFF);
             t.setGravity(android.view.Gravity.CENTER);
-            t.setPadding(App.dp(11), 0, App.dp(11), 0);
+            t.setPadding(App.dp(6), 0, App.dp(6), 0);
+            t.setMinWidth(App.dp(60));
             t.setOnClickListener(v -> selectionAction(which));
-            bar.addView(t, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, App.dp(44)));
+            line.addView(t, new LinearLayout.LayoutParams(0, App.dp(42), 1));
         }
         selBar = bar;
         selBar.setVisibility(View.GONE);
@@ -891,7 +1076,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         }), lp);
         speakTimer = panelChip(R.string.rd_sleep_timer, v -> sheets.sleepTimer(speaker));
         row.addView(speakTimer, lp);
-        row.addView(panelChip(R.string.rd_voice, v -> Speaker.openSystemSettings(this)), lp);
+        row.addView(panelChip(R.string.rd_voice, v -> sheets.voiceMenu()), lp);
         rateValue = stepRow(sp, R.string.rd_rate, () -> tune(-10, 0), () -> tune(10, 0));
         pitchValue = stepRow(sp, R.string.rd_pitch, () -> tune(0, -10), () -> tune(0, 10));
         speechPanel = sp;
@@ -926,7 +1111,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             return;
         }
         android.graphics.RectF r = page.selectionBounds();
-        int h = App.dp(44);
+        int h = App.dp(84);
         float y = r.top - h - App.dp(10);
         if (y < App.dp(28)) y = Math.min(r.bottom + App.dp(10), page.getHeight() - h - App.dp(28));
         selBar.setY(y);
@@ -939,9 +1124,23 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         if (!sel.isEmpty()) sheets.editRule(null, sel);
     }
 
+    private Notes.Note noteFromSelection() {
+        int idx = page.currentIdx();
+        Notes.Note n = new Notes.Note();
+        n.chapterId = chapters.get(idx).id;
+        n.idx = idx;
+        n.a = page.selectionStart();
+        n.b = page.selectionEnd();
+        n.text = page.selectedText();
+        n.chapterTitle = titleOf(chapters.get(idx));
+        n.color = ReaderPrefs.noteColor;
+        n.at = System.currentTimeMillis();
+        return n;
+    }
+
     private void selectionAction(int which) {
         final String sel = page.selectedText();
-        if (sel.isEmpty()) return;
+        if (sel.isEmpty() || page.currentIdx() >= chapters.size()) return;
         switch (which) {
             case 0:
                 ((android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE))
@@ -949,10 +1148,36 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
                 App.toast(getString(R.string.rd_copied));
                 page.clearSelection();
                 break;
-            case 1:
+            case 1: {
+                Notes.Note n = noteFromSelection();
+                page.clearSelection();
+                notes.all().add(n);
+                notes.save();
+                notesChanged();
+                break;
+            }
+            case 2: {
+                Notes.Note n = noteFromSelection();
+                page.clearSelection();
+                tools.editNote(n, true);
+                break;
+            }
+            case 3: {
+                String context = tools.sentenceAround(page.currentIdx(), page.selectionStart(), page.selectionEnd());
+                page.clearSelection();
+                tools.lookup(sel, context);
+                break;
+            }
+            case 4: {
+                int from = page.selectionStart();
+                page.clearSelection();
+                startSpeech(Math.max(1, from));
+                break;
+            }
+            case 5:
                 sheets.editRule(null, sel);
                 break;
-            case 2: {
+            case 6: {
                 // leave the passage out from now on; the rule can be removed under "Text replacements"
                 TextRules.Rule r = new TextRules.Rule();
                 r.find = sel;
@@ -963,15 +1188,13 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
                 App.toast(getString(R.string.rd_hidden));
                 break;
             }
-            case 3:
+            case 7:
                 page.selectParagraphs();
                 break;
-            case 4: {
-                int from = page.selectionStart();
+            case 8:
                 page.clearSelection();
-                startSpeech(Math.max(1, from));
+                tools.translate(sel);
                 break;
-            }
             default:
                 page.clearSelection();
                 try {
@@ -993,7 +1216,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             return false;
         }
         speakFollow = false;
-        speaker.speak(idx, chapters.get(idx).displayTitle(), text, offset);
+        speaker.speak(idx, titleOf(chapters.get(idx)), text, offset);
         return true;
     }
 
@@ -1050,7 +1273,8 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
         @Override
         public void onSpeakError(int reason) {
-            App.toast(getString(reason == Speaker.NO_ENGINE ? R.string.rd_tts_no_engine : R.string.rd_tts_no_voice));
+            App.toast(getString(reason == Speaker.NO_ENGINE ? R.string.rd_tts_no_engine
+                    : reason == Speaker.ONLINE_FAILED ? R.string.rt_voice_stopped : R.string.rd_tts_no_voice));
         }
     };
 
@@ -1109,6 +1333,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         click(R.id.modeSlide, () -> ReaderPrefs.mode = PageView.SLIDE);
         click(R.id.modeNone, () -> ReaderPrefs.mode = PageView.NONE);
         click(R.id.modeScroll, () -> ReaderPrefs.mode = PageView.SCROLL);
+        click(R.id.modeCurl, () -> ReaderPrefs.mode = PageView.CURL);
         click(R.id.optVolume, () -> ReaderPrefs.volumeKeys = !ReaderPrefs.volumeKeys);
         findViewById(R.id.optFont).setOnClickListener(v -> sheets.fonts());
         findViewById(R.id.optLayout).setOnClickListener(v -> {
@@ -1164,6 +1389,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         findViewById(R.id.modeSlide).setSelected(ReaderPrefs.mode == PageView.SLIDE);
         findViewById(R.id.modeNone).setSelected(ReaderPrefs.mode == PageView.NONE);
         findViewById(R.id.modeScroll).setSelected(ReaderPrefs.mode == PageView.SCROLL);
+        findViewById(R.id.modeCurl).setSelected(ReaderPrefs.mode == PageView.CURL);
         findViewById(R.id.optVolume).setSelected(ReaderPrefs.volumeKeys);
         findViewById(R.id.brightSystem).setSelected(ReaderPrefs.brightness < 0);
         ((SeekBar) findViewById(R.id.brightSeek)).setProgress(ReaderPrefs.brightness < 0 ? 50 : ReaderPrefs.brightness);
@@ -1260,6 +1486,14 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
+        // while the text scrolls by itself the volume keys set its speed
+        if (autoOn && ReaderPrefs.mode == PageView.SCROLL && !menuVisible()
+                && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP)) {
+            ReaderPrefs.autoSpeed = Math.max(4, Math.min(300, ReaderPrefs.autoSpeed + (keyCode == KeyEvent.KEYCODE_VOLUME_UP ? 4 : -4)));
+            page.setAutoScroll(App.dp(ReaderPrefs.autoSpeed));
+            showTip(getString(R.string.rt_auto_speed) + " " + ReaderPrefs.autoSpeed, 900);
+            return true;
+        }
         if (ReaderPrefs.volumeKeys && !menuVisible() && !(speaker.active() && !speaker.paused())
                 && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP)) {
             if (!resting()) page.turn(keyCode == KeyEvent.KEYCODE_VOLUME_DOWN);
@@ -1274,6 +1508,8 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
+        if (autoOn && ReaderPrefs.mode == PageView.SCROLL && !menuVisible()
+                && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP)) return true;
         if (ReaderPrefs.volumeKeys && !menuVisible() && !(speaker.active() && !speaker.paused())
                 && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP)) return true;
         return super.onKeyUp(keyCode, event);

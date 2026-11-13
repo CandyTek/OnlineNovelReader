@@ -25,4 +25,9 @@ public final class Book {
     public String lastChapter = "";
     public long lastCheckAt;
     public long updatedAt;
+
+    /** Imported from a file: there is no site to fetch anything from, the stored text is the book. */
+    public boolean local() {
+        return urlKey.startsWith("local:");
+    }
 }

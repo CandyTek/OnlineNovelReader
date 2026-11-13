@@ -33,7 +33,7 @@ final class Speaker {
         void onSpeakError(int reason);
     }
 
-    static final int NO_ENGINE = 1, NO_VOICE = 2;
+    static final int NO_ENGINE = 1, NO_VOICE = 2, ONLINE_FAILED = 3;
 
     /** The speaker that is talking, for the notification's stop button. */
     static Speaker current;
@@ -86,11 +86,129 @@ final class Speaker {
             SpeakService.start(ctx);
         }
         host.onSpeakState();
+        if (online()) {
+            next();
+            return;
+        }
         if (tts == null) {
             tts = new TextToSpeech(ctx, status -> App.MAIN.post(() -> onInit(status)));
             return;
         }
         if (ready) next();
+    }
+
+    // ------------------------------------------------------------------ a speech service on the web
+    //
+    // The user's own choice of server (off unless an address is set and switched on): each passage is fetched
+    // as an audio file and played. The address is a template in the form Legado's "httpTTS" sources use:
+    // {{speakText}} is the passage, {{speakSpeed}} the rate in percent; an optional ",{...}" tail gives
+    // "method", "body" and "headers".
+
+    private android.media.MediaPlayer player;
+
+    private static boolean online() {
+        return ReaderPrefs.ttsOnline && !ReaderPrefs.ttsUrl.trim().isEmpty();
+    }
+
+    private static String fill(String template, String say, boolean encode) throws java.io.IOException {
+        String enc = java.net.URLEncoder.encode(say, "UTF-8");
+        return template.replace("{{java.encodeURI(speakText)}}", enc)
+                .replace("{{speakText}}", encode ? enc : org.json.JSONObject.quote(say).replaceAll("^\"|\"$", ""))
+                .replace("{{speakSpeed}}", String.valueOf(ReaderPrefs.ttsRate));
+    }
+
+    static java.io.File fetchAudio(Context ctx, String template, String say) throws java.io.IOException {
+        String url = template.trim(), method = "GET", body = null;
+        org.json.JSONObject headers = null;
+        int cut = url.indexOf(",{");
+        if (cut > 0) {
+            try {
+                org.json.JSONObject o = new org.json.JSONObject(url.substring(cut + 1));
+                method = o.optString("method", "GET").toUpperCase(Locale.ROOT);
+                if (o.has("body")) body = o.get("body").toString();
+                headers = o.optJSONObject("headers");
+            } catch (org.json.JSONException e) {
+                throw new java.io.IOException("Bad options after the address");
+            }
+            url = url.substring(0, cut);
+        }
+        java.net.HttpURLConnection c = (java.net.HttpURLConnection) new java.net.URL(fill(url, say, true)).openConnection();
+        try {
+            c.setConnectTimeout(12000);
+            c.setReadTimeout(30000);
+            c.setRequestMethod(method);
+            if (headers != null) {
+                for (java.util.Iterator<String> it = headers.keys(); it.hasNext(); ) {
+                    String k = it.next();
+                    c.setRequestProperty(k, headers.optString(k));
+                }
+            }
+            if (body != null) {
+                c.setDoOutput(true);
+                try (java.io.OutputStream out = c.getOutputStream()) {
+                    out.write(fill(body, say, false).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+            }
+            int code = c.getResponseCode();
+            if (code != 200) throw new java.io.IOException("HTTP " + code);
+            String type = String.valueOf(c.getContentType()).toLowerCase(Locale.ROOT);
+            if (type.startsWith("text/") || type.contains("json")) throw new java.io.IOException("The server sent no audio (" + type + ")");
+            java.io.File f = new java.io.File(ctx.getCacheDir(), "speech.audio");
+            try (java.io.InputStream in = c.getInputStream(); java.io.OutputStream out = new java.io.FileOutputStream(f)) {
+                byte[] buf = new byte[16384];
+                for (int n; (n = in.read(buf)) > 0; ) out.write(buf, 0, n);
+            }
+            return f;
+        } finally {
+            c.disconnect();
+        }
+    }
+
+    private void releasePlayer() {
+        if (player == null) return;
+        try {
+            player.release();
+        } catch (Exception ignored) {
+        }
+        player = null;
+    }
+
+    private void speakOnline(final String say, final String id) {
+        final String template = ReaderPrefs.ttsUrl;
+        App.IO.execute(() -> {
+            java.io.File got = null;
+            try {
+                got = fetchAudio(ctx, template, say);
+            } catch (Exception ignored) {
+            }
+            final java.io.File f = got;
+            App.MAIN.post(() -> {
+                if (!active || paused || !id.equals("u" + seq)) return;
+                if (f == null) {
+                    done(id, true);
+                    return;
+                }
+                releasePlayer();
+                try {
+                    player = new android.media.MediaPlayer();
+                    player.setDataSource(f.getPath());
+                    player.setOnCompletionListener(mp -> {
+                        releasePlayer();
+                        done(id, false);
+                    });
+                    player.setOnErrorListener((mp, what, extra) -> {
+                        releasePlayer();
+                        done(id, true);
+                        return true;
+                    });
+                    player.prepare();
+                    player.start();
+                } catch (Exception e) {
+                    releasePlayer();
+                    done(id, true);
+                }
+            });
+        });
     }
 
     private void onInit(int status) {
@@ -155,7 +273,7 @@ final class Speaker {
     }
 
     private void next() {
-        if (!active || paused || !ready) return;
+        if (!active || paused || (!ready && !online())) return;
         if (pos >= passages.size()) {
             waiting = true;
             host.onSpeakChapterEnd(idx);
@@ -169,6 +287,18 @@ final class Speaker {
             int[] p = passages.get(pos);
             say = text.substring(Math.min(p[1], p[0] + resumeAt), p[1]);
             host.onSpeakPassage(idx, p[0], p[1]);
+        }
+        if (online()) {
+            spoken = 0;
+            seq++;
+            if (say.trim().isEmpty()) done("u" + seq, false);
+            else speakOnline(say, "u" + seq);
+            return;
+        }
+        if (tts == null) {
+            // the web service was switched off while it was speaking
+            stop();
+            return;
         }
         Locale want = Texts.mostlyCjk(say.length() > 20 ? say : text) ? Locale.CHINA : Locale.getDefault();
         if (!want.equals(locale)) {
@@ -195,8 +325,8 @@ final class Speaker {
         if (!active || paused || !id.equals("u" + seq)) return;
         if (error) {
             // one bad passage is skipped; an engine that fails on everything is given up on
-            if (++failures >= 5) {
-                host.onSpeakError(NO_VOICE);
+            if (++failures >= (online() ? 2 : 5)) {
+                host.onSpeakError(online() ? ONLINE_FAILED : NO_VOICE);
                 stop();
                 return;
             }
@@ -209,9 +339,16 @@ final class Speaker {
     void pause() {
         if (!active || paused) return;
         paused = true;
-        resumeAt += spoken;
-        seq++;
-        if (tts != null) tts.stop();
+        if (player != null) {
+            try {
+                player.pause();
+            } catch (Exception ignored) {
+            }
+        } else {
+            resumeAt += spoken;
+            seq++;
+            if (tts != null) tts.stop();
+        }
         host.onSpeakState();
     }
 
@@ -219,12 +356,20 @@ final class Speaker {
         if (!active || !paused) return;
         paused = false;
         host.onSpeakState();
+        if (player != null) {
+            try {
+                player.start();
+                return;
+            } catch (Exception e) {
+                releasePlayer();
+            }
+        }
         if (!waiting) next();
     }
 
     /** New rate or pitch: say the rest of the passage with it. */
     void retune() {
-        if (!active || paused || waiting || tts == null) return;
+        if (!active || paused || waiting || tts == null || player != null || online()) return;
         resumeAt += spoken;
         seq++;
         tts.stop();
@@ -238,6 +383,7 @@ final class Speaker {
         active = paused = waiting = false;
         resumeAt = 0;
         seq++;
+        releasePlayer();
         if (tts != null) tts.stop();
         if (current == this) current = null;
         SpeakService.stop(ctx);

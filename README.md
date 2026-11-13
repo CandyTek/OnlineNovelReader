@@ -112,6 +112,31 @@ Behind "More" in the reading menu:
   copy, share, read aloud from there, replace or hide. Replacements (plain or regular expression, for one
   book or all) are listed and edited under "Text replacements"; they never change the cached text.
 - Bookmarks, search in the cached chapters, automatic page turning.
+- **Page curl**: a fifth page-turn mode with a folding page, its shadow and the print showing through.
+- **Two pages side by side** when the screen is wide (landscape tablets); can be switched off.
+- **Highlights and notes**: five colours, a note per highlight, a list per book, export as text. Tap a
+  highlight to edit it.
+- **Look up / translate** a selection: web search, any dictionary app that accepts text, or the AI assistant.
+  Words looked up go into a **word list** with their sentence and are reviewed at growing intervals.
+- **Reading statistics**: minutes per day (two weeks), streak, total, time in this book, reading speed and
+  the time the rest of the chapter will take. Also on the shelf menu.
+- **Gestures**: every tap zone, swipe up, swipe down and double tap can open the menu, turn a page, change
+  chapter, open the contents, switch night mode, add a bookmark, start reading aloud, start auto page, search
+  or leave. A drag along the left edge can set the brightness.
+- **Automatic scrolling** in scroll mode: steady movement, speed changed with the volume keys while it runs.
+- **Speed reading**: the chapter flashed piece by piece at a set pace.
+- **Reading ruler**: everything but a movable band of lines is dimmed.
+- **Simplified / traditional Chinese** conversion (character table from OpenCC, Apache-2.0).
+- **Night theme by the clock**, shake to start or pause reading aloud.
+- **Online voice**: reading aloud through a speech service of your choice instead of the system engine (an
+  address with `{{speakText}}`; the simple "httpTTS" addresses made for the Legado reader work).
+- **AI assistant** (off until you enter a service and key; Claude Messages API or an OpenAI-compatible
+  endpoint): chapter summary, "the story so far", questions answered only from what you have read, explaining
+  and translating a selection.
+
+On the shelf menu: **import a book** from a TXT (UTF-8, UTF-16, GBK) or EPUB file, and **backup and restore**
+(one zip with the shelf, progress, settings, notes, statistics and word list, optionally the cached text; to a
+file or to a WebDAV folder when you press the button).
 
 Books whose site has no contents page are read in *linked mode*: chapters are chained through their
 "next chapter" links as you read or cache.
@@ -181,7 +206,8 @@ default too.
 
 ## Not included
 
-Page-curl animation, two-column pages in landscape, simplified/traditional conversion, switching a book between source sites, and an LLM-based engine
-(the second engine is algorithmic). In the browser: incognito tabs keep out of history and the tab session but
+Switching a book between source sites, an LLM-based sniffing engine (the second engine is algorithmic), a
+different voice per character, paragraph comments, PDF/MOBI import and automatic sync (the WebDAV backup is by
+hand). In the browser: incognito tabs keep out of history and the tab session but
 share cookies with normal tabs (a WebView limitation), `blob:` downloads, QR scanning, page translation,
 bookmark folders and sync are not implemented.
