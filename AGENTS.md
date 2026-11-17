@@ -63,7 +63,7 @@ adb -s 192.168.0.123:5555 install -r app/build/outputs/apk/debug/NovelSniffer-de
 ```
 
 The noise to filter from build output is the `source value 8` / deprecation warnings; anything else is real.
-Test results: `app/build/test-results/testDebugUnitTest/*.xml` (currently 35 tests in 5 classes).
+Test results: `app/build/test-results/testDebugUnitTest/*.xml` (currently 37 tests in 5 classes).
 
 ## 4. Test device
 
@@ -96,7 +96,10 @@ python -m http.server 8765 --bind 0.0.0.0 --directory <dir>     # serve <dir> it
 `python tools/mock_site/hijack_server.py` (port 8767, start at `/h/c1.html`) is a book without a contents page
 whose site sells its navigation: the first request for chapters 2 and 5 is answered with a redirect to another
 domain, and the first rendering of chapters 3 and 6 has that domain in the "next" link. It logs every hit, so
-the retries (and the absence of preloading) can be read from its output.
+the retries (and the absence of preloading) can be read from its output. The same server has `/e/c1.html`..`c8`,
+a book on a site that fails now and then: chapter 3 answers its first two requests with 404 and an error page
+in the reader template, chapter 5 answers its first two with that page and status 200 (one chapter load is two
+requests there, plain and rendered, so the first load fails and Retry works).
 
 Open `http://192.168.0.200:8765/` on the device. Contents:
 
@@ -162,13 +165,15 @@ sniff/                   PURE JAVA, no android.* imports: runs in JVM tests
   HeuristicEngine.java   main-text block, nav links, chapter list, scores (the largest and most delicate file)
   ContentCleaner.java    ad/watermark line removal, hard-wrap reflow
   FillerFilter.java      author notes / promotion at the two ends of a chapter (applied by the reader, not stored)
+  ErrorPage.java         a site's "not found / failed / try again / loading" page that passes for a short chapter
   PageResult.java        Type NONE/DETAIL/CHAPTER, BookInfo, ChapterRef, scores, selectors chosen
   Dom.java               jsoup helpers
 
 net/Http.java            HttpURLConnection: manual redirects, CookieManager cookies, charset sniffing -> GB18030,
                          6 MB cap. get() for HTML, getBytes() for binaries
 net/WebFetcher.java      off-screen WebView fetch for JS-rendered pages; decodeJs() unquotes evaluateJavascript results
-net/PageFetcher.java     HTTP first, WebView fallback
+net/PageFetcher.java     HTTP first, WebView fallback; watch() reports the stages of a fetch to the calling thread
+net/FetchError.java      an answer that is not the page: HTTP status, other site, error page, no text
 
 browser/
   BrowserActivity.java   tabs list, chrome (bars, start page, suggestions, find bar), menu and tab sheets,
@@ -177,6 +182,7 @@ browser/
   AdBlocker.java         host lists, request/navigation decisions, cosmetic script, list subscription
   Downloads.java         DownloadManager enqueue, data: URLs, file names
   LibraryActivity.java   bookmarks / history / downloads / offline pages, bookmark import-export
+  BarActions.java        what a long press on each bar button does: action ids, names, the settings dialog
   UserScripts.java       user scripts: storage, header parsing, URL matching
   SiteTests.java         debug builds only: the owner's hand-test verdict per primary domain (prefs file "site_tests")
   Favicons.java          one site icon per host (files/favicons/<host>.png + memory cache), fed only by
@@ -185,7 +191,7 @@ browser/
 reader/                  PageView (own typesetting: StaticLayout per paragraph, 3 chapter slots, modes
                          COVER/SLIDE/NONE/SCROLL, tap grid, text selection, highlight), ChapterLayout,
                          ReaderActivity (menus, TOC drawer, overlays), ReaderSheets (every dialog behind "More"),
-                         ReaderPrefs (all settings + themes), Backgrounds (generated paper textures, pictures),
+                         ReaderPrefs (all settings + themes), Backgrounds (papers found in assets/paper, pictures),
                          TextRules (user replacements), Speaker + SpeakService (text-to-speech, system
                          engine or a web service), ReaderTools (dialogs: notes, statistics, word list, look-up,
                          AI, gestures, speed reading), Notes, Stats, Vocab, Ai (the optional assistant's HTTP)
@@ -236,6 +242,20 @@ assets/cosmetic.js       injected element hider; "__STRICT__" is replaced with t
 - Tabs report changes through `a.onTabChanged(tab)`; `refreshUi()` redraws all chrome from the current tab and
   is called very often (every progress tick), so keep it cheap. The bookmark star is cached in
   `starUrl`/`starOn`; set `starUrl = null` after changing bookmarks, `homeDirty = true` to rebuild the start page.
+- The progress line is shown while `Tab.busy()`, i.e. from the moment a page is asked for (`Tab.begin`, or the
+  engine reporting progress under 100), not from `onPageStarted`, which only comes once the server has
+  answered; the shown value never drops under `FIRST_PROGRESS`. Reload through `Tab.reload()`, stop through
+  `Tab.stop()`. `loading` keeps its old meaning (between started and finished) for sniffing and injection.
+- `WebFetcher` looks at a short page (under 600 characters) four more times, a second apart, before taking it;
+  with an error status it is taken after one 1.5 s grace. It used to wait out the whole 25 s for either.
+- Tab swipes live in `BrowserActivity.dispatchTouchEvent`: a touch that starts on `topBar` (address not being
+  edited) or on `btnTabs` and moves sideways is taken from the views with a synthetic `ACTION_CANCEL`, so
+  taps and long presses there keep working. The switch happens only on release (`swipeBy`): a sleeping tab
+  reloads when shown, so the tabs passed on the way must not be activated.
+- Long presses on the bottom bar and the reload button are data: `BarActions` holds the action ids (stored in
+  the prefs `long_back` .. `long_reload`, so an id must never be renamed), their names and the settings
+  dialog; `BrowserActivity.runAction` carries one out. A new action needs an id and a name there and a `case`
+  in `runAction`. "none" returns false from the long-click listener, which leaves the press a tap.
 - Settings are plain `SharedPreferences`, re-applied to every tab in `onResume` via `Tab.applySettings()`.
   A new switch needs: a key in `prefs.xml` (or a menu toggle), the read in `applySettings`, strings in both
   languages.
@@ -266,7 +286,7 @@ assets/cosmetic.js       injected element hider; "__STRICT__" is replaced with t
   then `TextRules.apply`; the result lives only in the `memory` cache. Offsets (progress, bookmarks, selection,
   speech) refer to the shown text. After changing a rule or the filter call `reprocess()`.
 - Settings are static fields of `ReaderPrefs`; change one, then call `ReaderActivity.changed()` (save,
-  re-typeset keeping the position, window flags). Themes are addressed by key ("b0".."b8" built in, "c..."
+  re-typeset keeping the position, window flags). Themes are addressed by key ("b0".."b4" flat, "a<file>" papers, "c..."
   the user's), never by index.
 - Tap zones: `ReaderPrefs.zones`, 9 actions row by row. The zone editor refuses a grid without a menu cell.
 - Selection lives in `PageView` (chapter offsets in the current slot); the activity only shows the action bar
@@ -277,8 +297,32 @@ assets/cosmetic.js       injected element hider; "__STRICT__" is replaced with t
 - Speech: `Speaker` feeds the engine one passage at a time and asks the activity for the next chapter
   (`onSpeakChapterEnd`); `deliver()` restarts it when that chapter's text arrives. `SpeakService` is only a
   foreground keep-alive so the process is not frozen with the screen off.
-- Paper textures are computed (`Backgrounds.texture`), off the main thread, one bitmap cached. Do not add
-  picture assets without a licence the owner has approved.
+- Paper backgrounds are whatever pictures lie in `assets/paper` (`.jpg`, `.jpeg`, `.webp`, `.png`): the
+  folder is listed, **no file name appears in code** (owner's rule, 2026-11-16), and each file becomes a theme
+  with the key `a<file>` after the five flat ones. `Backgrounds.measure` tells from the picture what it is:
+  opposite edges that continue each other make a **tile** (repeated by `PageView.useBackground` with a shader
+  scaled by density / `TILE_DENSITY`; only its grain is used, the colour is the theme's), anything else is a
+  **sheet** (shown as it is, stretched so its four edges stay). The measurements are cached in the prefs
+  file `papers` until the next install. To add a background, drop the file in and note its source and
+  licence in the `LICENSE.txt` there; a tile must repeat without bands or it will be taken for a sheet.
+  A user's theme stores the file name (`p`); a file that has gone leaves the theme a flat colour.
+- Keyboard: `ReaderActivity.dispatchKeyEvent` -> `readerKey` takes keys before the views (a focused button
+  would use up Space and Enter) and only while no menu is up; the volume keys stay in `onKeyDown`. A new
+  shortcut also goes into the string `rd_keys_help` (both languages).
+- Automatic reading (`ReaderActivity.startAuto` / `applyAuto`, `PageView.setAuto`): scroll mode moves the
+  text at `autoSpeed` dp per second; the paged modes move a line down the page in `autoSec` seconds and draw
+  the next page above it (`drawSweep`, column by column), then `commit()` without an animation. With
+  `ReaderPrefs.autoSweep` off the activity's `autoTick` turns the page instead. One frame loop (`autoFrame`)
+  serves both and stands still while a finger, a menu or a selection is there, or it is paused. While it runs,
+  the menu zone toggles `autoPanel` (not part of `menuVisible()`, so keys and the motion go on); opening the
+  real menu stops it. On the last page of a chapter the sweep requests the next chapter, the same moment
+  scroll mode does (the end of the chapter is on screen), so it is not preloading.
+- "Continue reading on start" (`resume_reading`, off by default): `ReaderActivity.resumeOnStart`, called by
+  the shelf, opens the book in the pref `reader_last` when the shelf was started from the launcher, or was
+  rebuilt as the first screen of a new process, or comes back after the user left it with Back
+  (`ShelfActivity.leftByBack`: Android 12+ hides a launcher task on Back instead of ending it, so no
+  `onCreate` follows). A return to the shelf after Home is not a start. It must stay behind the launcher-intent test: the shelf is
+  also started by the browser and by file managers.
 - Page view: a "page" is a spread of `cols` columns (2 when wide and `twoPage`); `ChapterLayout.pages` are
   columns, so every use goes through `pages(slot)`, `colLines`, `colOf`, `originY(k)`. Curl mode draws the
   turning page and the one under it into two bitmaps per turn (`prepareCurl`); when they cannot be allocated
@@ -300,8 +344,39 @@ assets/cosmetic.js       injected element hider; "__STRICT__" is replaced with t
   is the only copy, so `Library.clearCache` skips them and nothing may fetch for them.
 - `Backup.restore` swaps the database file and all preference files under the running app: the caller must
   end the process afterwards (`ShelfActivity.restored`).
+- **A process killed in the foreground never reaches `onPause`.** The system does this to every app that has
+  WebView loaded whenever the WebView package is updated (exit reason `PACKAGE UPDATED`, "stop
+  com.google.android.webview due to installPackageLI"; seen on the owner's phone on 2026-11-15), and it looks
+  like a crash. It cannot be prevented, so nothing may depend on `onPause` alone: the reader writes the place
+  inside the chapter 1.5 s after the page rests (`savePosition`), the browser writes its tab list 3 s after a
+  change (`saveTabsSoon`). The prefs `reader_front` (book id) and `browser_front` are set in `onResume` and
+  removed in `onPause`; one left behind means such a death. `ReaderActivity.resumeAfterKill` (called by the
+  first shelf or browser of the next process) reopens that book, at most once a minute so a reader that dies on
+  opening cannot lock the shelf away; the browser restores its tabs as it does after being recreated.
+  Diagnose a reported "crash" with `adb shell dumpsys activity exit-info com.rc.novelreader` before looking
+  for an exception.
 - `Library.extendLinked` finding a chapter must be followed by moving there (`extendLinked()` in the activity
   does `jumpTo`); the reader asked for the next chapter, not for a longer list.
+
+### Failed chapters (error pages, loading and retry)
+
+- **An error page is never a chapter.** Three guards, all general: `Http` status >= 400 is an error (the WebView
+  is still tried, anti-bot checks answer 403/503 first); `WebFetcher` returns the status of the rendered
+  document (`performance` navigation entry, else `onReceivedHttpError`) and a failed load as a reason instead of
+  the engine's "webpage not available" DOM, and `PageFetcher` takes a page with an error status only when it is
+  sniffed as a full CHAPTER/DETAIL; `ErrorPage.looksLike` flags short pages whose heading or whole text is
+  about the page itself (`ChapterContent.errorPage`), which `Library.loadChapter` refuses with a `FetchError`.
+  Nothing is written for a refused page, so the same address is asked again next time.
+- A chapter found through a next link is named by its page; a forced reload may rename it (the first answer
+  may have been an error page). List titles only give way to a proper chapter title.
+- `ReaderActivity.load(chapter, force, keep)` is the only path that fetches text for the page view. Reload puts
+  the slot into LOADING (`PageView.setLoading`) and restores the old text with a toast when the fetch fails.
+  `explain(Throwable)` turns an error into {plain sentence, technical detail}; use it for every fetch failure
+  shown to the user. `PageFetcher.watch` (thread-local) feeds the stage line under "Loading" and under tips.
+- The error state has its own Retry / Open in browser buttons (`errorPanel`, shown from `onChapterState`); a tap
+  on the menu zone opens the menu there like anywhere else.
+- `Library.extendLinked` re-fetches the last chapter, so the reader replaces its in-memory text afterwards and
+  says "last chapter" only when the site was asked and had nothing; a failure is reported as a failure.
 
 ### Hijacked navigation (ads in place of the next chapter)
 
@@ -401,6 +476,14 @@ plain HTTP yields nothing usable. Whole-book caching is user-started (3 workers,
 
 ## 9. Known gaps
 
+- Failed chapters were run on the test device against `/e/c1.html` (404 and status-200 error page refused,
+  loading stages, error panel, Retry). Not run there: reload of a chapter that is already shown (old text kept
+  on failure), a load that fails without any answer, "Open in browser", and the end-of-book refresh.
+- Recovery after a foreground death was run with `adb shell am crash com.rc.novelreader` (the reader came back
+  on its chapter above the restored browser; `run-as ... kill -9` is refused on that device). Not run: the
+  place inside a long chapter (`savePosition`), the browser dying in front (`browser_front`), and a real
+  WebView update.
+- Chapters that were stored as an error page before that fix stay as they are until reloaded in the reader.
 - `Library.extendLinked` (end-of-book retry) and the moved-domain acceptance in `PageFetcher` have not been run
   on a device.
 - A page in the browser that has already appended several chapters by scrolling is sniffed as one chapter

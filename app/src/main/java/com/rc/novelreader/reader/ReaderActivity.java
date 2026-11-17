@@ -30,6 +30,8 @@ import com.rc.novelreader.data.Chapter;
 import com.rc.novelreader.data.Db;
 import com.rc.novelreader.data.Events;
 import com.rc.novelreader.data.Library;
+import com.rc.novelreader.net.FetchError;
+import com.rc.novelreader.net.PageFetcher;
 import com.rc.novelreader.shelf.DownloadService;
 
 import java.util.ArrayList;
@@ -63,11 +65,13 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     private Speaker speaker;
     private final com.rc.novelreader.sniff.FillerFilter filler = new com.rc.novelreader.sniff.FillerFilter();
     private List<ReaderPrefs.Theme> themeList = new ArrayList<>();
-    private View eyeView, restView, selBar, speechPanel;
+    private View eyeView, restView, selBar, speechPanel, errorPanel, errWeb;
     private TextView restText, speakToggle, speakTimer, rateValue, pitchValue;
     /** The user moved to another place while the book is read aloud: the voice follows once the text is there. */
     private boolean speakFollow;
-    private boolean autoOn;
+    private boolean autoOn, autoPaused;
+    private View autoPanel;
+    private TextView autoValue, autoToggle;
     private long restUntil, tickAt;
     /** Reading time since the last break; kept across reader sessions of one app run. */
     private static long readMs, lastSeen;
@@ -93,11 +97,61 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         c.startActivity(new Intent(c, ReaderActivity.class).putExtra(EXTRA_BOOK, bookId).putExtra(EXTRA_CHAPTER, chapterIdx));
     }
 
+    /** Back to the book read last: the reader that is open, or a new one. @return false when there is no such book */
+    public static boolean continueLast(Context c) {
+        if (bringToFront(c)) return true;
+        long id = App.prefs().getLong("reader_last", -1);
+        if (id < 0 || Db.book(id) == null) return false;
+        start(c, id, -1);
+        return true;
+    }
+
+    private static boolean resumeChecked;
+
+    /**
+     * A process that dies with the reader in front never reaches onPause: a crash, or the system killing every
+     * app that uses WebView at the moment it updates WebView. The first screen of the next process goes back
+     * to the book instead of leaving the reader on the shelf.
+     */
+    public static void resumeAfterKill(Activity a) {
+        resumeOnStart(a, false, false);
+    }
+
+    /**
+     * The same, plus the "continue reading on start" switch for the shelf: started from the launcher it goes
+     * straight to the book read last. A shelf the system rebuilt counts only as the first screen of a process
+     * (the app was dropped in the background); one rebuilt under a living reader or browser is just the shelf.
+     * Not after a death in the reader, which is decided above, perhaps against reopening; and the switch
+     * counts as a reopening there, so a reader that dies on opening leaves the shelf reachable next time.
+     */
+    public static void resumeOnStart(Activity a, boolean launcher, boolean rebuilt) {
+        boolean first = !resumeChecked;
+        resumeChecked = true;
+        android.content.SharedPreferences p = App.prefs();
+        long now = System.currentTimeMillis();
+        long id = first ? p.getLong("reader_front", -1) : -1;
+        if (id >= 0) {
+            // a reader that dies on opening must not lock the user out of the shelf
+            boolean again = now - p.getLong("reader_resumed_at", 0) < 60000;
+            p.edit().remove("reader_front").putLong("reader_resumed_at", now).apply();
+            if (again || Db.book(id) == null) return;
+            start(a, id, -1);
+            App.toast(a.getString(R.string.resumed_after_kill));
+            return;
+        }
+        if (!launcher || (rebuilt && !first) || !p.getBoolean("resume_reading", false)) return;
+        id = p.getLong("reader_last", -1);
+        if (id < 0 || Db.book(id) == null) return;
+        p.edit().putLong("reader_resumed_at", now).apply();
+        if (!bringToFront(a)) start(a, id, -1);
+    }
+
     // ------------------------------------------------------------------ lifecycle
 
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        resumeChecked = true;
         ReaderPrefs.load();
         if (Build.VERSION.SDK_INT >= 28) {
             getWindow().getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
@@ -124,7 +178,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         tocList = findViewById(R.id.tocList);
 
         page.setHost(this);
-        page.setLoadingText(getString(R.string.loading));
+        page.setLoadingText(getString(R.string.loading), getString(R.string.waited));
         page.applyPrefs();
         sheets = new ReaderSheets(this);
         tools = new ReaderTools(this, sheets);
@@ -147,6 +201,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             bottomBar.setPadding(0, 0, 0, bottom);
             displayPanel.setPadding(displayPanel.getPaddingLeft(), displayPanel.getPaddingTop(), displayPanel.getPaddingRight(), bottom + App.dp(10));
             speechPanel.setPadding(App.dp(14), App.dp(12), App.dp(14), bottom + App.dp(10));
+            autoPanel.setPadding(App.dp(14), App.dp(12), App.dp(14), bottom + App.dp(10));
             findViewById(R.id.tocBody).setPadding(0, top, 0, bottom);
             int cutTop = 0;
             if (Build.VERSION.SDK_INT >= 28 && insets.getDisplayCutout() != null) cutTop = insets.getDisplayCutout().getSafeInsetTop();
@@ -190,6 +245,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     protected void onResume() {
         super.onResume();
         if (book == null) return;
+        App.prefs().edit().putLong("reader_front", bookId).putLong("reader_last", bookId).apply();
         long now = System.currentTimeMillis();
         // time away from the book longer than a break counts as one
         if (lastSeen > 0 && now - lastSeen >= ReaderPrefs.restFor * 60000L) readMs = 0;
@@ -204,6 +260,8 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
     @Override
     protected void onPause() {
+        App.MAIN.removeCallbacks(savePosition);
+        App.prefs().edit().remove("reader_front").apply();
         saveProgress();
         ReaderPrefs.save();
         Stats.flush();
@@ -282,25 +340,131 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             App.MAIN.post(() -> deliver(c.id, hit, null));
             return;
         }
+        load(c, false, null);
+    }
+
+    /**
+     * Gets a chapter's text off the main thread and hands it to the page.
+     * @param force fetch it from the site even when it is cached
+     * @param keep  the text that was on screen before a forced fetch: it comes back when the fetch fails
+     */
+    private void load(final Chapter c, final boolean force, final String keep) {
+        // one fetch per chapter at a time; whoever asks second gets the same answer
         if (!loading.add(c.id)) return;
+        final Book b = book;
         App.IO.execute(() -> {
-            String text = null, error = null;
+            String text = null;
+            Throwable error = null;
+            PageFetcher.watch((stage, attempt) -> App.MAIN.post(() -> {
+                if (isDestroyed() || !loading.contains(c.id)) return;
+                for (Chapter at : chapters) if (at.id == c.id) page.setLoadingDetail(at.idx, stageText(stage, attempt));
+            }));
             try {
-                text = display(c, Library.loadChapter(book, c, false));
+                text = display(c, Library.loadChapter(b, c, force));
             } catch (Throwable t) {
-                error = t.getMessage() == null ? t.toString() : t.getMessage();
+                error = t;
+            } finally {
+                PageFetcher.watch(null);
             }
-            final String body = text, err = error;
+            final String body = text;
+            final Throwable err = error;
             App.MAIN.post(() -> {
                 loading.remove(c.id);
+                if (isDestroyed()) return;
                 if (body != null) memory.put(c.id, body);
+                else if (keep != null) {
+                    // refreshing failed: the reader keeps what was there and is told why nothing changed
+                    memory.put(c.id, keep);
+                    deliver(c.id, keep, null);
+                    App.toast(getString(R.string.reload_failed, explain(err)[0]));
+                    return;
+                }
+                // loading may have named the chapter while the list was swapped for a newer copy
+                for (Chapter at : chapters) if (at.id == c.id && at != c && at.title.isEmpty()) at.title = c.title;
                 deliver(c.id, body, err);
             });
         });
     }
 
+    /** What went wrong: {in words anybody understands, the technical detail}. */
+    String[] explain(Throwable t) {
+        int msg = R.string.err_other;
+        String detail = t == null ? "" : t.getMessage() == null ? t.toString() : t.getMessage();
+        if (t instanceof FetchError) {
+            FetchError f = (FetchError) t;
+            if (f.kind == FetchError.HTTP) {
+                msg = f.code == 404 || f.code == 410 ? R.string.err_not_found
+                        : f.code == 401 || f.code == 403 || f.code == 429 ? R.string.err_refused
+                        : f.code >= 500 ? R.string.err_server : R.string.err_other;
+            } else if (f.kind == FetchError.OFFSITE) msg = R.string.err_ad;
+            else if (f.kind == FetchError.ERROR_PAGE) msg = R.string.err_error_page;
+            else msg = R.string.err_no_text;
+        } else if (t instanceof java.net.SocketTimeoutException) msg = R.string.err_timeout;
+        else if (t instanceof java.net.UnknownHostException || t instanceof java.net.ConnectException
+                || t instanceof java.net.NoRouteToHostException || t instanceof javax.net.ssl.SSLException
+                || detail.startsWith("net::")) msg = R.string.err_network;
+        return new String[]{getString(msg), detail};
+    }
+
+    /** The message of a failed chapter: what happened in plain words, and smaller the detail for those who want it. */
+    private CharSequence errorText(Throwable t) {
+        String[] e = explain(t);
+        android.text.SpannableStringBuilder sb = new android.text.SpannableStringBuilder(getString(R.string.load_failed));
+        sb.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD), 0, sb.length(), 0);
+        sb.append("\n").append(e[0]);
+        if (!e[1].isEmpty()) {
+            int from = sb.length();
+            sb.append("\n").append(e[1]);
+            sb.setSpan(new android.text.style.RelativeSizeSpan(0.8f), from, sb.length(), 0);
+        }
+        return sb;
+    }
+
+    private String stageText(int stage, int attempt) {
+        switch (stage) {
+            case PageFetcher.Watcher.CONNECT:
+                return getString(R.string.stage_connect);
+            case PageFetcher.Watcher.RENDER:
+                return getString(R.string.stage_render);
+            case PageFetcher.Watcher.RETRY:
+                return getString(R.string.stage_retry, attempt, PageFetcher.TRIES);
+            case PageFetcher.Watcher.FIND_NEXT:
+                return getString(R.string.stage_next);
+            default:
+                return "";
+        }
+    }
+
+    /** Shows the steps of the fetches made on the calling (background) thread under a tip that is on screen. */
+    private void watchTip(final String base) {
+        PageFetcher.watch((stage, attempt) -> App.MAIN.post(() -> {
+            if (!isDestroyed() && refreshingToc) showTip(base + "\n" + stageText(stage, attempt), 0);
+        }));
+    }
+
+    @Override
+    public void onChapterState() {
+        if (errorPanel == null) return;
+        boolean failed = opened && page.isError();
+        if (failed) {
+            // under the message, wherever the screen is tall or wide
+            int h = findViewById(R.id.root).getHeight();
+            if (h <= 0) h = getResources().getDisplayMetrics().heightPixels;
+            ((FrameLayout.LayoutParams) errorPanel.getLayoutParams()).bottomMargin = h * 3 / 10;
+            errWeb.setVisibility(book.local() ? View.GONE : View.VISIBLE);
+            errorPanel.requestLayout();
+        }
+        errorPanel.setVisibility(failed ? View.VISIBLE : View.GONE);
+    }
+
+    private void openWeb() {
+        int idx = page.currentIdx();
+        String url = idx < chapters.size() ? chapters.get(idx).url : book.detailUrl;
+        BrowserActivity.open(this, url);
+    }
+
     /** Chapter indices can shift while a load is in flight, so results are matched by chapter id. */
-    private void deliver(long chapterId, String text, String error) {
+    private void deliver(long chapterId, String text, Throwable error) {
         if (isDestroyed()) return;
         for (Chapter c : chapters) {
             if (c.id != chapterId) continue;
@@ -315,7 +479,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
                     speaker.speak(c.idx, titleOf(c), text, from);
                 }
             } else {
-                page.setError(c.idx, getString(R.string.load_failed, error == null ? "" : error));
+                page.setError(c.idx, errorText(error));
                 if (current && speaker.active()) speaker.stop();
             }
             if (tocPanel.getVisibility() == View.VISIBLE) tocAdapter.notifyDataSetChanged();
@@ -325,7 +489,9 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
     @Override
     public void onCenterTap() {
-        toggleMenu();
+        // while the book reads by itself the menu zone brings up its controls; the menu is one tap further
+        if (autoOn && !menuVisible()) autoPanel.setVisibility(autoPanel.getVisibility() == View.VISIBLE ? View.GONE : View.VISIBLE);
+        else toggleMenu();
     }
 
     @Override
@@ -339,8 +505,19 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             lastSavedIdx = idx;
             Library.saveProgress(bookId, idx, offset);
             bindBook();
+        } else {
+            // the place inside the chapter too, once the page has rested: a killed process never reaches onPause
+            App.MAIN.removeCallbacks(savePosition);
+            App.MAIN.postDelayed(savePosition, 1500);
         }
     }
+
+    private final Runnable savePosition = new Runnable() {
+        @Override
+        public void run() {
+            if (!isDestroyed()) saveProgress();
+        }
+    };
 
     private int lastSavedIdx = -1;
     private boolean seekTracking;
@@ -364,26 +541,53 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     private void extendLinked() {
         if (refreshingToc) return;
         refreshingToc = true;
-        showTip(getString(R.string.looking_for_next), 0);
+        final String tip = getString(R.string.looking_for_next);
+        showTip(tip, 0);
+        final Book b = book;
+        final Chapter last = chapters.isEmpty() ? null : chapters.get(chapters.size() - 1);
         App.IO.execute(() -> {
             boolean grew = false;
+            Throwable error = null;
+            watchTip(tip);
             try {
-                grew = Library.extendLinked(book);
-            } catch (Throwable ignored) {
+                grew = Library.extendLinked(b);
+            } catch (Throwable t) {
+                error = t;
+            } finally {
+                PageFetcher.watch(null);
+            }
+            // The search fetches the last chapter's page again, so its stored text (and title) may no longer be
+            // what this screen holds: without this the old text stayed until the book was opened again.
+            String now = null;
+            try {
+                now = last == null ? null : display(last, Library.cachedText(last));
+            } catch (RuntimeException ignored) {
             }
             final boolean more = grew;
+            final String text = now;
+            final Throwable err = error;
             App.MAIN.post(() -> {
                 refreshingToc = false;
                 seekTip.setVisibility(View.GONE);
                 if (isDestroyed()) return;
+                boolean changed = text != null && !text.equals(memory.get(last.id));
+                if (changed) {
+                    memory.put(last.id, text);
+                    noteRanges.remove(last.id);
+                }
                 if (more) {
                     reloadChapters();
                     // the reader asked for the next chapter: go there instead of waiting for a second tap
                     if (page.currentIdx() + 1 < chapters.size()) jumpTo(page.currentIdx() + 1);
-                } else {
-                    App.toast(getString(R.string.last_chapter));
-                    if (speaker.waiting()) speaker.stop();
+                    return;
                 }
+                if (speaker.waiting()) speaker.stop();
+                if (changed) {
+                    reloadChapters();
+                    deliver(last.id, text, null);
+                }
+                // "last chapter" only when the site was really asked and had nothing more
+                App.toast(err != null ? getString(R.string.next_failed, explain(err)[0]) : getString(R.string.last_chapter));
             });
         });
     }
@@ -514,27 +718,35 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         if (refreshingToc) return;
         refreshingToc = true;
         final int before = chapters.size();
-        if (initial) showTip(getString(R.string.chapters_loading), 0);
-        else if (manual) showTip(getString(R.string.toc_updating), 0);
+        final String tip = initial ? getString(R.string.chapters_loading) : manual ? getString(R.string.toc_updating) : null;
+        if (tip != null) showTip(tip, 0);
+        final TextView chip = findViewById(R.id.tocRefresh);
+        chip.setText(R.string.refreshing);
+        chip.setEnabled(false);
         App.IO.execute(() -> {
-            String error = null;
+            Throwable error = null;
+            if (tip != null) watchTip(tip);
             try {
                 Library.refreshToc(book);
             } catch (Throwable t) {
-                error = t.getMessage();
+                error = t;
+            } finally {
+                PageFetcher.watch(null);
             }
-            final String err = error;
+            final Throwable err = error;
             App.MAIN.post(() -> {
                 refreshingToc = false;
                 seekTip.setVisibility(View.GONE);
                 if (isDestroyed()) return;
+                chip.setText(R.string.refresh);
+                chip.setEnabled(true);
                 reloadChapters();
                 if (manual) {
-                    if (err != null) App.toast(getString(R.string.open_failed, err));
+                    if (err != null) App.toast(getString(R.string.toc_failed, explain(err)[0]));
                     else if (chapters.size() <= before) App.toast(getString(R.string.no_updates));
                 }
                 if (initial && chapters.isEmpty()) {
-                    App.toast(getString(R.string.open_failed, err == null ? "" : err));
+                    App.toast(getString(R.string.open_failed, err == null ? "" : explain(err)[0]));
                     finish();
                 }
             });
@@ -728,29 +940,19 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             int idx = page.currentIdx();
             if (idx >= chapters.size()) return;
             final Chapter c = chapters.get(idx);
-            memory.remove(c.id);
             hideMenus();
-            App.IO.execute(() -> {
-                String error = null;
-                String text = null;
-                try {
-                    text = display(c, Library.loadChapter(book, c, true));
-                } catch (Throwable t) {
-                    error = t.getMessage();
-                }
-                final String body = text, err = error;
-                App.MAIN.post(() -> {
-                    if (body != null) memory.put(c.id, body);
-                    deliver(c.id, body, err);
-                });
-            });
-            showTip(getString(R.string.loading), 1200);
+            // already on its way, and the page says so
+            if (loading.contains(c.id)) return;
+            // The text leaves the screen while the page is fetched again, so the wait and its outcome are visible;
+            // if the fetch fails the old text comes back.
+            String shown = memory.get(c.id);
+            memory.remove(c.id);
+            noteRanges.remove(c.id);
+            if (speaker.active()) speaker.stop();
+            page.setLoading(idx);
+            load(c, true, shown);
         });
-        findViewById(R.id.btnWeb).setOnClickListener(v -> {
-            int idx = page.currentIdx();
-            String url = idx < chapters.size() ? chapters.get(idx).url : book.detailUrl;
-            BrowserActivity.open(this, url);
-        });
+        findViewById(R.id.btnWeb).setOnClickListener(v -> openWeb());
         findViewById(R.id.btnPrev).setOnClickListener(v -> {
             if (page.currentIdx() > 0) jumpTo(page.currentIdx() - 1);
             else App.toast(getString(R.string.first_chapter));
@@ -903,11 +1105,12 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         if (book != null) keepAwake();
     }
 
+    /** Paged modes with the sweeping line switched off: the page is turned when its time is up. */
     private final Runnable autoTick = new Runnable() {
         @Override
         public void run() {
-            if (!autoOn || ReaderPrefs.mode == PageView.SCROLL) return;
-            if (!menuVisible() && !resting() && !page.hasSelection()) page.turn(true);
+            if (!autoOn || ReaderPrefs.mode == PageView.SCROLL || ReaderPrefs.autoSweep) return;
+            if (!autoPaused && !menuVisible() && !resting() && !page.hasSelection()) page.turn(true);
             App.MAIN.postDelayed(this, ReaderPrefs.autoSec * 1000L);
         }
     };
@@ -915,19 +1118,47 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     void startAuto() {
         hideMenus();
         autoOn = true;
+        autoPaused = false;
         keepAwake();
-        App.MAIN.removeCallbacks(autoTick);
-        // scroll mode moves the text steadily; the paged modes turn a page every so many seconds
-        if (ReaderPrefs.mode == PageView.SCROLL) page.setAutoScroll(App.dp(ReaderPrefs.autoSpeed));
-        else App.MAIN.postDelayed(autoTick, ReaderPrefs.autoSec * 1000L);
+        applyAuto();
         App.toast(getString(ReaderPrefs.mode == PageView.SCROLL ? R.string.rt_auto_scroll_started : R.string.rd_auto_started));
+    }
+
+    /** Hands the current speed to the page: scroll mode moves the text, the paged modes sweep a line or turn. */
+    private void applyAuto() {
+        boolean scroll = ReaderPrefs.mode == PageView.SCROLL;
+        App.MAIN.removeCallbacks(autoTick);
+        page.setAuto(scroll ? App.dp(ReaderPrefs.autoSpeed) : 0, !scroll && ReaderPrefs.autoSweep ? ReaderPrefs.autoSec : 0);
+        page.setAutoPaused(autoPaused);
+        if (!scroll && !ReaderPrefs.autoSweep) App.MAIN.postDelayed(autoTick, ReaderPrefs.autoSec * 1000L);
+        autoValue.setText(scroll ? String.valueOf(ReaderPrefs.autoSpeed) : getString(R.string.rd_auto_per_page, ReaderPrefs.autoSec));
+        autoToggle.setText(autoPaused ? R.string.rd_resume : R.string.rd_pause);
+    }
+
+    private void autoFaster(boolean faster) {
+        if (ReaderPrefs.mode == PageView.SCROLL) {
+            ReaderPrefs.autoSpeed = Math.max(4, Math.min(300, ReaderPrefs.autoSpeed + (faster ? 4 : -4)));
+        } else {
+            ReaderPrefs.autoSec = Math.max(2, Math.min(120, ReaderPrefs.autoSec + (faster ? -1 : 1)));
+        }
+        applyAuto();
+        if (autoPanel.getVisibility() != View.VISIBLE) showTip(getString(R.string.rd_auto_speed) + " " + autoValue.getText(), 900);
+    }
+
+    private void pauseAuto() {
+        autoPaused = !autoPaused;
+        applyAuto();
+        if (autoPanel.getVisibility() != View.VISIBLE) showTip(getString(autoPaused ? R.string.rd_auto_paused : R.string.rd_auto_started), 900);
     }
 
     private void stopAuto() {
         if (!autoOn) return;
-        autoOn = false;
+        autoOn = autoPaused = false;
         App.MAIN.removeCallbacks(autoTick);
-        page.setAutoScroll(0);
+        page.setAuto(0, 0);
+        autoPanel.setVisibility(View.GONE);
+        // the speed may have been changed while it ran
+        ReaderPrefs.save();
         keepAwake();
         App.toast(getString(R.string.rd_auto_stopped));
     }
@@ -943,7 +1174,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             // statistics: time in front of the text, not in a break, not listening, and not long after the last touch
             long step = now - tickAt;
             if (step > 0 && step < 5000 && !resting() && !(speaker.active() && !speaker.paused())
-                    && (autoOn || now - lastTouch < 180000)) {
+                    && ((autoOn && !autoPaused) || now - lastTouch < 180000)) {
                 Stats.add(bookId, step, pendingChars);
                 pendingChars = 0;
             }
@@ -1027,6 +1258,32 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         eyeView.setVisibility(View.GONE);
         root.addView(eyeView, 1, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
+        // what can be done about a chapter that failed, under its message and under the menus
+        LinearLayout ep = new LinearLayout(this);
+        int[] names = {R.string.retry, R.string.err_open_web};
+        for (int i = 0; i < names.length; i++) {
+            final boolean retry = i == 0;
+            TextView t = new TextView(this);
+            t.setText(names[i]);
+            t.setTextSize(15);
+            t.setTextColor(0xFFFFFFFF);
+            t.setGravity(android.view.Gravity.CENTER);
+            t.setBackgroundResource(R.drawable.tip_bg);
+            t.setPadding(App.dp(22), 0, App.dp(22), 0);
+            t.setOnClickListener(v -> {
+                if (retry) page.retry();
+                else openWeb();
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, App.dp(44));
+            lp.setMargins(App.dp(8), 0, App.dp(8), 0);
+            ep.addView(t, lp);
+            if (!retry) errWeb = t;
+        }
+        errorPanel = ep;
+        errorPanel.setVisibility(View.GONE);
+        root.addView(errorPanel, 2, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.BOTTOM | android.view.Gravity.CENTER_HORIZONTAL));
+
         // menu next to selected text, two rows
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.VERTICAL);
@@ -1079,6 +1336,24 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         row.addView(panelChip(R.string.rd_voice, v -> sheets.voiceMenu()), lp);
         rateValue = stepRow(sp, R.string.rd_rate, () -> tune(-10, 0), () -> tune(10, 0));
         pitchValue = stepRow(sp, R.string.rd_pitch, () -> tune(0, -10), () -> tune(0, 10));
+        // controls of automatic reading; the text keeps moving under them so a new speed can be judged at once
+        LinearLayout ap = new LinearLayout(this);
+        ap.setOrientation(LinearLayout.VERTICAL);
+        ap.setBackgroundResource(R.color.reader_panel);
+        ap.setClickable(true);
+        autoValue = stepRow(ap, R.string.rd_auto_speed, () -> autoFaster(false), () -> autoFaster(true));
+        ((LinearLayout.LayoutParams) autoValue.getLayoutParams()).width = App.dp(92);
+        row = panelRow(ap);
+        autoToggle = panelChip(R.string.rd_pause, v -> pauseAuto());
+        row.addView(autoToggle, lp);
+        row.addView(panelChip(R.string.stop, v -> stopAuto()), lp);
+        row.addView(panelChip(R.string.menu, v -> toggleMenu()), lp);
+        autoPanel = ap;
+        autoPanel.setVisibility(View.GONE);
+        autoPanel.setPadding(App.dp(14), App.dp(12), App.dp(14), App.dp(10));
+        root.addView(autoPanel, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.Gravity.BOTTOM));
+
         speechPanel = sp;
         speechPanel.setVisibility(View.GONE);
         speechPanel.setPadding(App.dp(14), App.dp(12), App.dp(14), App.dp(10));
@@ -1400,10 +1675,10 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             GradientDrawable d = new GradientDrawable();
             d.setCornerRadius(App.dp(17));
             // a texture or picture shows as a shaded dot
-            if (t.texture != 0 || !t.image.isEmpty()) {
+            if (!t.paper.isEmpty() || !t.image.isEmpty()) {
                 d.setOrientation(GradientDrawable.Orientation.TL_BR);
-                d.setColors(new int[]{t.bg, android.graphics.Color.rgb(android.graphics.Color.red(t.bg) * 3 / 4,
-                        android.graphics.Color.green(t.bg) * 3 / 4, android.graphics.Color.blue(t.bg) * 2 / 3)});
+                d.setColors(new int[]{t.bg, android.graphics.Color.rgb(android.graphics.Color.red(t.bg) * 5 / 6,
+                        android.graphics.Color.green(t.bg) * 5 / 6, android.graphics.Color.blue(t.bg) * 4 / 5)});
             } else d.setColor(t.bg);
             d.setStroke(App.dp(on ? 2 : 1), on ? 0xFF6FBFAE : 0x55FFFFFF);
             row.getChildAt(i).setBackground(d);
@@ -1484,14 +1759,111 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
     // ------------------------------------------------------------------ keys
 
+    private int keyTaken;
+
+    /**
+     * A keyboard (or a remote control). Taken before the views get the key: a button that happens to hold the
+     * focus would use up Space and Enter, and the arrows would wander between views.
+     */
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent e) {
+        int code = e.getKeyCode();
+        if (book != null && e.getAction() == KeyEvent.ACTION_DOWN && readerKey(code, e)) {
+            keyTaken = code;
+            onUserInteraction();
+            return true;
+        }
+        if (e.getAction() == KeyEvent.ACTION_UP && code == keyTaken) {
+            keyTaken = 0;
+            return true;
+        }
+        return super.dispatchKeyEvent(e);
+    }
+
+    private boolean readerKey(int code, KeyEvent e) {
+        if (e.isAltPressed() || e.isMetaPressed() || resting()) return false;
+        boolean ctrl = e.isCtrlPressed(), first = e.getRepeatCount() == 0;
+        if (!ctrl && (code == KeyEvent.KEYCODE_M || code == KeyEvent.KEYCODE_F10)) {
+            if (first) toggleMenu();
+            return true;
+        }
+        // with a menu up the keys belong to it (seek bar, lists, buttons)
+        if (menuVisible() || !opened) return false;
+        if (ctrl) {
+            if (code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                if (first) onAction(code == KeyEvent.KEYCODE_DPAD_RIGHT ? ReaderPrefs.A_NEXT_CHAPTER : ReaderPrefs.A_PREV_CHAPTER);
+                return true;
+            }
+            if (code == KeyEvent.KEYCODE_F || code == KeyEvent.KEYCODE_D) {
+                if (first) onAction(code == KeyEvent.KEYCODE_F ? ReaderPrefs.A_SEARCH : ReaderPrefs.A_BOOKMARK);
+                return true;
+            }
+            return false;
+        }
+        switch (code) {
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+                page.turn(code == KeyEvent.KEYCODE_DPAD_RIGHT);
+                return true;
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+            case KeyEvent.KEYCODE_DPAD_UP:
+                if (ReaderPrefs.mode == PageView.SCROLL) page.nudge(code == KeyEvent.KEYCODE_DPAD_DOWN);
+                else page.turn(code == KeyEvent.KEYCODE_DPAD_DOWN);
+                return true;
+            case KeyEvent.KEYCODE_PAGE_DOWN:
+            case KeyEvent.KEYCODE_PAGE_UP:
+                page.turn(code == KeyEvent.KEYCODE_PAGE_DOWN);
+                return true;
+            case KeyEvent.KEYCODE_SPACE:
+                if (autoOn) {
+                    if (first) pauseAuto();
+                } else page.turn(!e.isShiftPressed());
+                return true;
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+                if (page.isError()) {
+                    if (first) page.retry();
+                } else if (code == KeyEvent.KEYCODE_DPAD_CENTER) {
+                    if (first) toggleMenu();
+                } else page.turn(true);
+                return true;
+            case KeyEvent.KEYCODE_LEFT_BRACKET:
+            case KeyEvent.KEYCODE_RIGHT_BRACKET:
+                if (first) onAction(code == KeyEvent.KEYCODE_RIGHT_BRACKET ? ReaderPrefs.A_NEXT_CHAPTER : ReaderPrefs.A_PREV_CHAPTER);
+                return true;
+            case KeyEvent.KEYCODE_MOVE_HOME:
+                if (first) jump(page.currentIdx(), 0);
+                return true;
+            case KeyEvent.KEYCODE_EQUALS:
+            case KeyEvent.KEYCODE_PLUS:
+            case KeyEvent.KEYCODE_NUMPAD_ADD:
+            case KeyEvent.KEYCODE_MINUS:
+            case KeyEvent.KEYCODE_NUMPAD_SUBTRACT:
+                boolean bigger = code != KeyEvent.KEYCODE_MINUS && code != KeyEvent.KEYCODE_NUMPAD_SUBTRACT;
+                ReaderPrefs.textSp = Math.max(12, Math.min(40, ReaderPrefs.textSp + (bigger ? 1 : -1)));
+                changed();
+                showTip(getString(R.string.font) + " " + ReaderPrefs.textSp, 900);
+                return true;
+            case KeyEvent.KEYCODE_ESCAPE:
+                if (first) onBackPressed();
+                return true;
+            default:
+                break;
+        }
+        int action = code == KeyEvent.KEYCODE_T ? ReaderPrefs.A_CONTENTS : code == KeyEvent.KEYCODE_N ? ReaderPrefs.A_NIGHT
+                : code == KeyEvent.KEYCODE_F ? ReaderPrefs.A_SEARCH : code == KeyEvent.KEYCODE_B ? ReaderPrefs.A_BOOKMARK
+                : code == KeyEvent.KEYCODE_S ? ReaderPrefs.A_SPEAK : code == KeyEvent.KEYCODE_A ? ReaderPrefs.A_AUTO : -1;
+        if (action < 0) return false;
+        if (first) onAction(action);
+        return true;
+    }
+
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        // while the text scrolls by itself the volume keys set its speed
-        if (autoOn && ReaderPrefs.mode == PageView.SCROLL && !menuVisible()
-                && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP)) {
-            ReaderPrefs.autoSpeed = Math.max(4, Math.min(300, ReaderPrefs.autoSpeed + (keyCode == KeyEvent.KEYCODE_VOLUME_UP ? 4 : -4)));
-            page.setAutoScroll(App.dp(ReaderPrefs.autoSpeed));
-            showTip(getString(R.string.rt_auto_speed) + " " + ReaderPrefs.autoSpeed, 900);
+        // while the book reads by itself the volume keys set its speed
+        if (autoOn && !menuVisible() && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP)) {
+            autoFaster(keyCode == KeyEvent.KEYCODE_VOLUME_UP);
             return true;
         }
         if (ReaderPrefs.volumeKeys && !menuVisible() && !(speaker.active() && !speaker.paused())
@@ -1508,8 +1880,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
     @Override
     public boolean onKeyUp(int keyCode, KeyEvent event) {
-        if (autoOn && ReaderPrefs.mode == PageView.SCROLL && !menuVisible()
-                && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP)) return true;
+        if (autoOn && !menuVisible() && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP)) return true;
         if (ReaderPrefs.volumeKeys && !menuVisible() && !(speaker.active() && !speaker.paused())
                 && (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP)) return true;
         return super.onKeyUp(keyCode, event);
@@ -1524,6 +1895,10 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         }
         if (page.hasSelection()) {
             page.clearSelection();
+            return;
+        }
+        if (autoPanel != null && autoPanel.getVisibility() == View.VISIBLE) {
+            autoPanel.setVisibility(View.GONE);
             return;
         }
         if (!book.inShelf && opened) {

@@ -69,6 +69,10 @@ public class SettingsActivity extends Activity {
                 BrowserActivity.clearDataDialog(getActivity(), null);
                 return true;
             });
+            findPreference("long_press").setOnPreferenceClickListener(p -> {
+                com.rc.novelreader.browser.BarActions.configure(getActivity());
+                return true;
+            });
             findPreference("default_browser").setOnPreferenceClickListener(p -> {
                 try {
                     startActivity(new Intent(Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS));

@@ -17,15 +17,15 @@ import java.util.List;
 public final class ReaderPrefs {
     private ReaderPrefs() {}
 
-    /** A page look: colours, plus optionally a generated paper texture or the user's own picture. */
+    /** A page look: colours, plus optionally a paper from the assets folder or the user's own picture. */
     public static final class Theme {
-        /** "b0".."b8" for the built-in ones, "c&lt;time&gt;" for the user's. */
+        /** "b0".."b4" for the flat ones, "a&lt;file&gt;" for a paper of the assets folder, "c&lt;time&gt;" for the user's. */
         public String key = "";
         public String name = "";
         public int bg, fg;
-        /** One of the {@link Backgrounds} kinds, 0 for a flat colour. */
-        public int texture;
-        /** Path of a background picture, "" for none. Wins over the texture. */
+        /** File name of a paper in the assets folder (see {@link Backgrounds}), "" for a flat colour. */
+        public String paper = "";
+        /** Path of a background picture, "" for none. Wins over the paper. */
         public String image = "";
 
         public boolean custom() {
@@ -46,23 +46,19 @@ public final class ReaderPrefs {
             t.name = name;
             t.bg = bg;
             t.fg = fg;
-            t.texture = texture;
+            t.paper = paper;
             t.image = image;
             return t;
         }
     }
 
-    /** {background, text, texture}: paper, white, green, dark grey, black, then four paper textures. */
+    /** {background, text}: paper, white, green, dark grey, black. The papers of the assets folder follow them. */
     private static final int[][] BUILT_IN = {
-            {0xFFF3E9D2, 0xFF3B3226, 0},
-            {0xFFFFFFFF, 0xFF222222, 0},
-            {0xFFCFE6D0, 0xFF22352A, 0},
-            {0xFF2A2C2B, 0xFFA7ADA9, 0},
-            {0xFF000000, 0xFF7C827E, 0},
-            {0xFFE9D8AE, 0xFF3A2D1C, Backgrounds.PARCHMENT},
-            {0xFFDCC48F, 0xFF33261A, Backgrounds.AGED},
-            {0xFFF1EBDD, 0xFF2E2A24, Backgrounds.RICE},
-            {0xFFC9A873, 0xFF2B1F12, Backgrounds.KRAFT},
+            {0xFFF3E9D2, 0xFF3B3226},
+            {0xFFFFFFFF, 0xFF222222},
+            {0xFFCFE6D0, 0xFF22352A},
+            {0xFF2A2C2B, 0xFFA7ADA9},
+            {0xFF000000, 0xFF7C827E},
     };
     private static final String NIGHT_KEY = "b3";
 
@@ -115,6 +111,8 @@ public final class ReaderPrefs {
     public static boolean edgeBright = false;
     /** Two pages side by side when the screen is wide. */
     public static boolean twoPage = true;
+    /** Paged modes, automatic reading: a line uncovers the next page (true) or the page is turned when its time is up. */
+    public static boolean autoSweep = true;
     /** Dim all but a movable band of lines. */
     public static boolean ruler = false;
     /** Shaking the device starts or pauses reading aloud. */
@@ -163,6 +161,7 @@ public final class ReaderPrefs {
         gestures = parseActions(p.getString("r_gestures", ""), GESTURES_DEFAULT);
         edgeBright = p.getBoolean("r_edge_bright", false);
         twoPage = p.getBoolean("r_two_page", true);
+        autoSweep = p.getBoolean("r_auto_sweep", true);
         ruler = p.getBoolean("r_ruler", false);
         shake = p.getBoolean("r_shake", false);
         convert = p.getInt("r_convert", 0);
@@ -190,7 +189,12 @@ public final class ReaderPrefs {
                 t.name = o.optString("n");
                 t.bg = o.getInt("b");
                 t.fg = o.getInt("f");
-                t.texture = o.optInt("x");
+                t.paper = o.optString("p");
+                // themes saved while textures were numbered: the number picks a paper so the theme keeps one
+                int kind = o.optInt("x");
+                List<Backgrounds.Paper> papers = Backgrounds.papers();
+                if (t.paper.isEmpty() && kind > 0 && !papers.isEmpty()) t.paper = papers.get((kind - 1) % papers.size()).file;
+                if (Backgrounds.paper(t.paper) == null) t.paper = "";
                 t.image = o.optString("i");
                 custom.add(t);
             }
@@ -208,7 +212,7 @@ public final class ReaderPrefs {
         try {
             for (Theme t : custom) {
                 arr.put(new JSONObject().put("k", t.key).put("n", t.name).put("b", t.bg).put("f", t.fg)
-                        .put("x", t.texture).put("i", t.image));
+                        .put("p", t.paper).put("i", t.image));
             }
         } catch (Exception ignored) {
         }
@@ -223,7 +227,7 @@ public final class ReaderPrefs {
                 .putInt("r_auto_sec", autoSec).putInt("r_tts_rate", ttsRate).putInt("r_tts_pitch", ttsPitch)
                 .putString("r_themes", arr.toString())
                 .putString("r_gestures", g.toString()).putBoolean("r_edge_bright", edgeBright)
-                .putBoolean("r_two_page", twoPage).putBoolean("r_ruler", ruler).putBoolean("r_shake", shake)
+                .putBoolean("r_two_page", twoPage).putBoolean("r_auto_sweep", autoSweep).putBoolean("r_ruler", ruler).putBoolean("r_shake", shake)
                 .putInt("r_convert", convert).putInt("r_auto_speed", autoSpeed).putInt("r_night_from", nightFrom)
                 .putInt("r_night_to", nightTo).putString("r_tts_url", ttsUrl).putBoolean("r_tts_online", ttsOnline)
                 .putInt("r_note_color", noteColor).apply();
@@ -258,7 +262,16 @@ public final class ReaderPrefs {
             t.key = "b" + i;
             t.bg = BUILT_IN[i][0];
             t.fg = BUILT_IN[i][1];
-            t.texture = BUILT_IN[i][2];
+            out.add(t);
+        }
+        for (Backgrounds.Paper p : Backgrounds.papers()) {
+            Theme t = new Theme();
+            t.key = "a" + p.file;
+            t.bg = p.color;
+            t.paper = p.file;
+            // the picture decides: dark text on light paper, light on dark
+            t.fg = 0xFF2E2A25;
+            if (t.dark()) t.fg = 0xFFA7ADA9;
             out.add(t);
         }
         out.addAll(custom);

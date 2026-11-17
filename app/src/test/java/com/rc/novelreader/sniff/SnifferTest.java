@@ -369,6 +369,56 @@ public class SnifferTest {
         assertEquals("http://m.fake-shuwu.com/chapter/77/3019", r.chapter.nextUrl);
     }
 
+    private static String readerFrame(String docTitle, String heading, String body) {
+        return "<html><head><title>" + docTitle + "</title></head><body>"
+                + "<div class='header'><a href='/'>首页</a><a href='/top/'>排行榜</a></div>"
+                + "<h1>" + heading + "</h1><div id='content'>" + body + "</div>"
+                + "<div class='nav'><a href='/read/5/4010.html'>上一章</a><a href='/read/5/'>目录</a>"
+                + "<a href='/read/5/4012.html'>下一章</a></div></body></html>";
+    }
+
+    /** A site's own "could not load" page sits in the reader template, navigation and all: it is not a chapter. */
+    @Test
+    public void errorPageInReaderTemplateIsNotAChapter() {
+        String page = readerFrame("页面加载失败_某某书斋", "页面加载失败",
+                "<p>抱歉,您访问的章节内容暂时无法显示,可能是网络繁忙,请稍后刷新页面重试。</p>");
+        PageResult r = sniffer.analyze("http://www.fake-shuzhai.com/read/5/4011.html", page);
+        assertFalse(r.type == PageResult.Type.CHAPTER);
+        assertTrue(r.chapter == null || r.chapter.errorPage);
+
+        // the heading is the chapter's, the text is only the frame of a script-built reader
+        page = readerFrame("第12章 夜雨_长安行_某某书斋", "第12章 夜雨", "<p>正文正在加载中,请稍候,如长时间没有显示请刷新。</p>");
+        r = sniffer.analyze("http://www.fake-shuzhai.com/read/5/4011.html", page);
+        assertFalse(r.type == PageResult.Type.CHAPTER);
+        assertTrue(r.chapter == null || r.chapter.errorPage);
+
+        page = "<html><head><title>404 Not Found</title></head><body><h1>404 Not Found</h1>"
+                + "<p>The requested URL was not found on this server. Please check the address and try again later.</p>"
+                + "<hr><address>nginx</address></body></html>";
+        r = sniffer.analyze("http://www.fake-shuzhai.com/read/5/4011.html", page);
+        assertFalse(r.type == PageResult.Type.CHAPTER);
+        assertTrue(r.chapter == null || r.chapter.errorPage);
+    }
+
+    /** Chapters may be numbered 404, be called "error", or be a few lines long. */
+    @Test
+    public void chaptersThatLookLikeErrorsAreKept() {
+        String page = readerFrame("第404章 系统错误_长安行_某某书斋", "第404章 系统错误", paras(8, "", "<p>", "</p>"));
+        PageResult r = sniffer.analyze("http://www.fake-shuzhai.com/read/5/4011.html", page);
+        assertEquals(PageResult.Type.CHAPTER, r.type);
+        assertFalse(r.chapter.errorPage);
+
+        page = readerFrame("第404章 系统错误_长安行_某某书斋", "第404章 系统错误", "<p>" + PARA + "</p>");
+        r = sniffer.analyze("http://www.fake-shuzhai.com/read/5/4011.html", page);
+        assertNotNull(r.chapter);
+        assertFalse(r.chapter.errorPage);
+
+        assertFalse(ErrorPage.looksLike("请假条_长安行_某某书斋", "请假条", "今天有事,请假一天,明天补上。"));
+        assertFalse(ErrorPage.looksLike("出错了_长安行", "出错了", paras(8, "\n", "", "")));
+        assertTrue(ErrorPage.looksLike("某某书斋", "", "章节内容加载失败,请刷新重试"));
+        assertTrue(ErrorPage.looksLike("502 Bad Gateway", "502 Bad Gateway", "nginx is unable to reach the upstream server right now"));
+    }
+
     @Test
     public void heuristicSuccessIsLearnedAsRule() {
         Sniffer s = new Sniffer();

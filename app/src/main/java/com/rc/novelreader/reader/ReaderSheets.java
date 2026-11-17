@@ -205,6 +205,8 @@ final class ReaderSheets {
         acts.add(this::controls);
         labels.add(a.getString(R.string.rt_group_text));
         acts.add(this::textOptions);
+        labels.add(a.getString(R.string.settings));
+        acts.add(() -> a.startActivity(new android.content.Intent(a, com.rc.novelreader.settings.SettingsActivity.class)));
         menu(R.string.more, labels, acts);
     }
 
@@ -256,6 +258,8 @@ final class ReaderSheets {
             a.changed();
             App.toast(state(R.string.rt_shake, onOff(ReaderPrefs.shake)));
         });
+        labels.add(a.getString(R.string.rd_keys));
+        acts.add(() -> dlg(R.string.rd_keys).setMessage(R.string.rd_keys_help).setPositiveButton(R.string.ok, null).show());
         menu(R.string.rt_group_controls, labels, acts);
     }
 
@@ -365,6 +369,7 @@ final class ReaderSheets {
         list.setAdapter(adapter);
         final AlertDialog d = dlg(R.string.rd_search).setView(col).setNegativeButton(R.string.cancel, null).create();
         final int[] run = {0};
+        App.numpadEnter(q);
         q.setOnEditorActionListener((v, action, ev) -> {
             final String word = q.getText().toString().trim();
             if (word.isEmpty()) return true;
@@ -416,6 +421,7 @@ final class ReaderSheets {
         stepper(col, R.string.rd_auto_interval, 2, 120, 1, () -> ReaderPrefs.autoSec, v -> ReaderPrefs.autoSec = v,
                 " s", null);
         stepper(col, R.string.rt_auto_speed, 4, 300, 4, () -> ReaderPrefs.autoSpeed, v -> ReaderPrefs.autoSpeed = v, "", null);
+        toggle(col, R.string.rd_auto_sweep, ReaderPrefs.autoSweep, v -> ReaderPrefs.autoSweep = v != 0);
         note(col, R.string.rt_auto_speed_note);
         note(col, R.string.rd_auto_note);
         dlg(R.string.rd_auto_page).setView(col).setNegativeButton(R.string.cancel, null)
@@ -614,7 +620,7 @@ final class ReaderSheets {
             t.bg = ReaderPrefs.bg();
             t.fg = ReaderPrefs.fg();
         }
-        final int[] textures = {R.string.rd_tex_none, R.string.rd_tex_parchment, R.string.rd_tex_aged, R.string.rd_tex_rice, R.string.rd_tex_kraft};
+        final List<Backgrounds.Paper> papers = Backgrounds.papers();
         LinearLayout col = column();
         final EditText name = new EditText(a);
         name.setHint(R.string.rd_theme_name);
@@ -642,7 +648,8 @@ final class ReaderSheets {
         note(col, R.string.rd_theme_note);
         final Runnable show = () -> {
             preview.setTextColor(t.fg);
-            texBtn.setText(a.getString(R.string.rd_texture) + " · " + a.getString(textures[t.texture]));
+            final Backgrounds.Paper paper = Backgrounds.paper(t.paper);
+            texBtn.setText(a.getString(R.string.rd_texture) + " · " + (paper == null ? a.getString(R.string.rd_tex_none) : paper.name()));
             picBtn.setText(t.image.isEmpty() ? R.string.rd_picture : R.string.rd_picture_remove);
             Bitmap b = null;
             try {
@@ -650,11 +657,31 @@ final class ReaderSheets {
                     BitmapFactory.Options o = new BitmapFactory.Options();
                     o.inSampleSize = 4;
                     b = BitmapFactory.decodeFile(t.image, o);
-                } else if (t.texture != Backgrounds.NONE) b = Backgrounds.texture(t.texture, t.bg, 720, 300);
+                } else if (paper != null) b = Backgrounds.preview(paper, t.bg, 360, 540);
             } catch (Throwable ignored) {
             }
-            if (b != null) preview.setBackground(new BitmapDrawable(a.getResources(), b));
-            else preview.setBackgroundColor(t.bg);
+            if (b != null) {
+                // no size of its own: a background's size is the least its view may be, and a tile is large
+                BitmapDrawable d = !t.image.isEmpty() ? new BitmapDrawable(a.getResources(), b)
+                        : new BitmapDrawable(a.getResources(), b) {
+                            @Override
+                            public int getIntrinsicWidth() {
+                                return -1;
+                            }
+
+                            @Override
+                            public int getIntrinsicHeight() {
+                                return -1;
+                            }
+                        };
+                if (Backgrounds.tiled(t)) {
+                    // the tile is made for one density; saying so lets the drawable scale it as the page does
+                    b.setDensity(Math.round(Backgrounds.TILE_DENSITY * 160));
+                    d.setTargetDensity(a.getResources().getDisplayMetrics());
+                    d.setTileModeXY(android.graphics.Shader.TileMode.REPEAT, android.graphics.Shader.TileMode.REPEAT);
+                }
+                preview.setBackground(d);
+            } else preview.setBackgroundColor(t.bg);
         };
         bgBtn.setOnClickListener(v -> color(R.string.rd_bg_color, t.bg, c -> {
             t.bg = c;
@@ -665,7 +692,9 @@ final class ReaderSheets {
             show.run();
         }));
         texBtn.setOnClickListener(v -> {
-            t.texture = (t.texture + 1) % Backgrounds.KINDS;
+            // none, then every paper of the folder in turn
+            int at = papers.indexOf(Backgrounds.paper(t.paper)) + 1;
+            t.paper = at >= papers.size() ? "" : papers.get(at).file;
             show.run();
         });
         picBtn.setOnClickListener(v -> {

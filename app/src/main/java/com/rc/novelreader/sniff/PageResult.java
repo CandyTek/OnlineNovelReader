@@ -36,6 +36,8 @@ public final class PageResult {
         public boolean nextInChapter;
         /** The page has a "next" control whose target is another site (an ad swapped in): fetch again for the real link. */
         public boolean nextHijacked;
+        /** The text is the site's own error or "still loading" message, not a chapter (see {@link ErrorPage}). */
+        public boolean errorPage;
         /** Weighted length of text (see Texts.wlen). */
         public int wlen;
     }

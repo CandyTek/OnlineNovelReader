@@ -62,6 +62,8 @@ final class Tab {
     volatile String pageHost = "";
     volatile int blocked;
     boolean loading, desktop, cosmeticInjected;
+    /** Asked for but not answered yet: onPageStarted only comes once the server has replied. */
+    boolean starting;
     int progress;
     private String sslBadHost;
 
@@ -192,6 +194,7 @@ final class Tab {
         navUrl = u;
         navRetries = 0;
         web.loadUrl(u);
+        if (!u.startsWith("javascript:")) begin();
     }
 
     /**
@@ -231,10 +234,37 @@ final class Tab {
         destroyWeb();
     }
 
+    /** Shows the progress bar from the moment a page is asked for, not from the moment it answers. */
+    void begin() {
+        starting = true;
+        progress = FIRST_PROGRESS;
+        a.onTabChanged(this);
+    }
+
+    void reload() {
+        if (web == null) return;
+        web.reload();
+        begin();
+    }
+
+    void stop() {
+        if (web == null) return;
+        web.stopLoading();
+        starting = false;
+        a.onTabChanged(this);
+    }
+
+    boolean busy() {
+        return loading || starting;
+    }
+
+    /** Wide enough to be seen on a 2dp line; the engine's own first values are smaller. */
+    static final int FIRST_PROGRESS = 12;
+
     void destroyWeb() {
         sniffSeq++;
         sniffed = null;
-        loading = false;
+        loading = starting = false;
         if (web == null) return;
         if (web.getParent() != null) ((ViewGroup) web.getParent()).removeView(web);
         web.stopLoading();
@@ -304,8 +334,9 @@ final class Tab {
             title = "";
             icon = null;
             blocked = 0;
-            progress = 5;
+            progress = Math.max(progress, FIRST_PROGRESS);
             loading = true;
+            starting = false;
             cosmeticInjected = false;
             sniffed = null;
             sniffSeq++;
@@ -321,7 +352,7 @@ final class Tab {
 
         @Override
         public void onPageFinished(WebView view, String u) {
-            loading = false;
+            loading = starting = false;
             navUrl = null; // reloads and history moves start no tracked navigation, so nothing stale may remain
             if (u != null && !u.startsWith("about:")) url = u;
             String t = view.getTitle();
@@ -433,7 +464,10 @@ final class Tab {
     private final class Chrome extends WebChromeClient {
         @Override
         public void onProgressChanged(WebView view, int p) {
-            progress = p;
+            // link taps, history moves and redirects report progress before onPageStarted: that is a load too
+            if (p >= 100) starting = false;
+            else if (!loading) starting = true;
+            progress = Math.max(p, FIRST_PROGRESS);
             if (p >= 35 && !cosmeticInjected && loading) inject();
             a.onTabChanged(Tab.this);
         }

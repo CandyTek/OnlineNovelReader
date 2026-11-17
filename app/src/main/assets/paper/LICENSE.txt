@@ -1,0 +1,17 @@
+Paper textures in this folder come from ambientCG (https://ambientcg.com) and are
+licensed CC0 1.0 Universal (public domain dedication):
+https://creativecommons.org/publicdomain/zero/1.0/
+
+They are the colour maps of the "1K-JPG" downloads, scaled to three quarters; all but
+cloud.jpg also had their large-scale lighting evened out so the repeat shows no bands.
+
+  fine.jpg    Paper001   https://ambientcg.com/view?id=Paper001
+  fleck.jpg   Paper002   https://ambientcg.com/view?id=Paper002
+  cloud.jpg   Paper003   https://ambientcg.com/view?id=Paper003
+  kraft.jpg   Paper004   https://ambientcg.com/view?id=Paper004
+  fibre.jpg   Paper006   https://ambientcg.com/view?id=Paper006
+
+
+The following materials are sourced from this website's AI-generated content
+
+  papertexture1-5  https://papertexture.io/zh/downloads

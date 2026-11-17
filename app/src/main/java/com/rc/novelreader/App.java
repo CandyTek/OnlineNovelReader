@@ -50,4 +50,22 @@ public class App extends Application {
     public static int dp(float v) {
         return Math.round(v * I.getResources().getDisplayMetrics().density);
     }
+
+    /**
+     * Makes the keypad's Enter do in a one-line field what the main Enter does: the field's own action (go,
+     * search). Older systems do not treat the key as Enter at all, newer ones hand it to the listener under
+     * its own key code, which the listeners written for Enter do not recognise.
+     */
+    public static void numpadEnter(final android.widget.TextView field) {
+        field.setOnKeyListener((v, code, e) -> {
+            if (code != android.view.KeyEvent.KEYCODE_NUMPAD_ENTER) return false;
+            if (e.getAction() == android.view.KeyEvent.ACTION_DOWN && e.getRepeatCount() == 0) {
+                int action = field.getImeOptions() & android.view.inputmethod.EditorInfo.IME_MASK_ACTION;
+                field.onEditorAction(action == android.view.inputmethod.EditorInfo.IME_ACTION_UNSPECIFIED
+                        ? android.view.inputmethod.EditorInfo.IME_ACTION_GO : action);
+            }
+            // the release too: left to the field it would move the focus on
+            return true;
+        });
+    }
 }

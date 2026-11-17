@@ -9,6 +9,8 @@ class H(http.server.BaseHTTPRequestHandler):
         p = self.path.split("?")[0]
         n = hits[p] = hits.get(p, 0) + 1
         sys.stderr.write("HIT %s #%d\n" % (p, n)); sys.stderr.flush()
+        if p.startswith("/e/c") and p.endswith(".html"):
+            return self.flaky(int(p[4:-5]), n)
         if not (p.startswith("/h/c") and p.endswith(".html")):
             self.send_response(404); self.end_headers(); return
         i = int(p[4:-5])
@@ -25,6 +27,24 @@ class H(http.server.BaseHTTPRequestHandler):
                 i, i, i, i, "".join("<p>%s（%d-%d）</p>" % (PARA, i, k) for k in range(10)), nav)
         b = body.encode("utf-8")
         self.send_response(200); self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    # /e/c1.html .. c8: a book without a contents page on a site that fails now and then. Chapter 3 answers its
+    # first two requests with 404 and the site's error page (one load = plain request + rendered one, so the
+    # first load fails and a retry works); chapter 5 answers its first two with the same page and status 200.
+    def flaky(self, i, n):
+        nav = "<div class='nav'>" + ("<a href='/e/c%d.html'>上一章</a>" % (i - 1) if i > 1 else "") \
+              + ("<a id='next_url' href='/e/c%d.html'>下一章</a>" % (i + 1) if i < 8 else "") + "</div>"
+        bad = i > 8 or (i in (3, 5) and n <= 2)
+        if bad:
+            body = ("<html><head><meta charset='utf-8'><title>页面加载失败_某某书屋</title></head><body><h1>页面加载失败</h1>"
+                    "<div id='content'><p>抱歉，您访问的章节内容暂时无法显示，请稍后刷新页面重试。</p></div>%s</body></html>") % nav
+        else:
+            body = ("<html><head><meta charset='utf-8'><title>第%d章 渡口其%d_寒江记_某某书屋</title></head><body>"
+                    "<h1>第%d章 渡口其%d</h1><div id='content'>%s</div>%s</body></html>") % (
+                    i, i, i, i, "".join("<p>%s（%d-%d）</p>" % (PARA, i, k) for k in range(10)), nav)
+        b = body.encode("utf-8")
+        self.send_response(404 if bad and i != 5 else 200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self, *a): pass
 http.server.ThreadingHTTPServer(("0.0.0.0", 8767), H).serve_forever()

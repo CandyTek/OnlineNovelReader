@@ -4,6 +4,7 @@ import android.annotation.SuppressLint;
 import android.graphics.Bitmap;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
@@ -53,27 +54,62 @@ public final class WebFetcher {
     }
 
     /**
-     * @return {final url, html, address of the next chapter found by scrolling (or null)} or null.
+     * @return {final url, html, address of the next chapter found by scrolling (or null), status} or null.
+     * Status is the HTTP status of the page when it is an error (400 and up), else null. When the address could
+     * not be loaded at all, html is null and status holds the reason.
      * Must not be called on the main thread.
      */
     public static String[] fetch(final String url, final String referer, final long timeoutMs, NextProbe probe) {
         if (Looper.myLooper() == Looper.getMainLooper()) throw new IllegalStateException("main thread");
         synchronized (LOCK) {
-            final String[] out = new String[3];
+            final String[] out = new String[4];
+            final Nav nav = new Nav();
             final CountDownLatch done = new CountDownLatch(1);
             final long deadline = SystemClock.uptimeMillis() + timeoutMs;
             final Runnable[] grab = new Runnable[1];
             App.MAIN.post(() -> {
                 try {
                     ensureWebView();
-                    grab[0] = () -> web.evaluateJavascript("document.documentElement.outerHTML", v -> {
+                    grab[0] = () -> web.evaluateJavascript(GRAB_JS, v -> {
                         if (done.getCount() == 0) return;
-                        String html = decodeJs(v);
-                        boolean interstitial = html.length() < 600 || html.contains("Just a moment")
-                                || html.contains("challenge-platform") || html.contains("cf-browser-verification");
-                        if (interstitial && SystemClock.uptimeMillis() < deadline - 2000) return; // wait for the real page
+                        String[] part = decodeJs(v).split("\n", 3);
+                        if (part.length < 3) part = new String[]{"0", "", ""};
+                        String html = part[2];
+                        boolean late = SystemClock.uptimeMillis() >= deadline - 2000;
+                        // the engine's own "webpage not available" page
+                        // (an aborted load that a script replaced with a real page is not one: that has an address)
+                        if (part[1].startsWith("chrome-error:") || (nav.failure != null && !part[1].startsWith("http"))) {
+                            out[3] = nav.failure == null ? "The page could not be loaded" : nav.failure;
+                            done.countDown();
+                            return;
+                        }
+                        int status = 0;
+                        try {
+                            status = Integer.parseInt(part[0]);
+                        } catch (NumberFormatException ignored) {
+                        }
+                        // engines that cannot tell the status of the document: the status seen while loading counts
+                        // as long as no other page has finished since
+                        if (status == 0 && nav.status >= 400 && nav.finishedSince <= 1) status = nav.status;
+                        if (status >= 400 && !nav.waited && !late) {
+                            // an anti-bot check answers with an error first and then reloads: give it a moment
+                            nav.waited = true;
+                            App.MAIN.postDelayed(grab[0], 1500);
+                            return;
+                        }
+                        boolean challenge = html.contains("Just a moment") || html.contains("challenge-platform")
+                                || html.contains("cf-browser-verification");
+                        // a page still being built by its scripts is short; so is a site's error page, which never
+                        // grows: an error status has had its moment above, anything else gets a few looks
+                        boolean shell = html.length() < 600 && status < 400 && nav.looks++ < 4;
+                        if ((challenge || shell) && !late) {
+                            App.MAIN.removeCallbacks(grab[0]);
+                            App.MAIN.postDelayed(grab[0], 1000); // wait for the real page
+                            return;
+                        }
                         out[0] = web.getUrl();
                         out[1] = html;
+                        out[3] = status >= 400 ? String.valueOf(status) : null;
                         done.countDown();
                     });
                     web.setWebViewClient(new WebViewClient() {
@@ -85,8 +121,25 @@ public final class WebFetcher {
                         @Override
                         public void onPageFinished(WebView view, String u) {
                             if (u == null || u.startsWith("about:")) return;
+                            nav.finishedSince++;
                             App.MAIN.removeCallbacks(grab[0]);
                             App.MAIN.postDelayed(grab[0], 900);
+                        }
+
+                        @Override
+                        public void onReceivedHttpError(WebView view, WebResourceRequest request, WebResourceResponse response) {
+                            if (!request.isForMainFrame()) return;
+                            nav.status = response.getStatusCode();
+                            nav.failure = null;
+                            nav.finishedSince = 0;
+                        }
+
+                        @Override
+                        public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError err) {
+                            if (!request.isForMainFrame()) return;
+                            nav.failure = String.valueOf(err.getDescription());
+                            nav.status = 0;
+                            nav.finishedSince = 0;
                         }
 
                         @Override
@@ -137,9 +190,28 @@ public final class WebFetcher {
                 web.setWebViewClient(new WebViewClient());
                 web.loadUrl("about:blank");
             });
+            if (out[3] != null && out[1] == null) return out;
             return out[1] == null || out[1].isEmpty() ? null : out;
         }
     }
+
+    /** What the callbacks saw of the main document while it loaded. */
+    private static final class Nav {
+        /** Error status of the last main-frame answer, 0 when none. */
+        int status;
+        /** Why the last main-frame load failed (no answer at all), or null. */
+        String failure;
+        /** Pages finished since that error: the error page itself is the first. */
+        int finishedSince;
+        boolean waited;
+        /** Times a short page was looked at again. */
+        int looks;
+    }
+
+    /** Status of the document (0 when the engine does not tell), its address and its markup, one per line. */
+    private static final String GRAB_JS = "(function(){var s=0;try{var n=performance.getEntriesByType('navigation')[0];"
+            + "if(n&&n.responseStatus)s=n.responseStatus;}catch(e){}"
+            + "return s+'\\n'+location.href+'\\n'+document.documentElement.outerHTML;})()";
 
     /** Scrolls to the end of the page, says so to the scripts of the page, and reports where the page thinks it is. */
     private static final String SCROLL_JS = "(function(){try{var d=document,e=d.scrollingElement||d.documentElement,"

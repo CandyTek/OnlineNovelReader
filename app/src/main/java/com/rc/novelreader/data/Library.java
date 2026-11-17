@@ -4,6 +4,7 @@ import android.content.ContentValues;
 import android.database.sqlite.SQLiteDatabase;
 
 import com.rc.novelreader.App;
+import com.rc.novelreader.net.FetchError;
 import com.rc.novelreader.net.PageFetcher;
 import com.rc.novelreader.sniff.ContentCleaner;
 import com.rc.novelreader.sniff.PageResult;
@@ -401,8 +402,11 @@ public final class Library {
         for (int page = 0; page < 40; page++) {
             PageResult r = PageFetcher.fetch(url, referer, true, needNext);
             ChapterContent cc = r.chapter;
+            // The site's "not found" or "try again" page is not the chapter, and half a chapter is not one either:
+            // nothing is stored, so the same address is simply asked again next time.
+            if (cc != null && cc.errorPage) throw new FetchError(FetchError.ERROR_PAGE, 0, cc.title);
             if (cc == null) {
-                if (page == 0) throw new IOException("No readable text on the page");
+                if (page == 0) throw new FetchError(FetchError.NO_TEXT, 0, null);
                 break;
             }
             String t = ContentCleaner.stripPageMark(cc.title);
@@ -419,11 +423,15 @@ public final class Library {
             url = cc.nextUrl;
         }
         String body = text.toString();
-        if (Texts.wlen(body) < 2) throw new IOException("No readable text on the page");
+        if (Texts.wlen(body) < 2) throw new FetchError(FetchError.NO_TEXT, 0, null);
         write(f, body);
         ContentValues v = new ContentValues();
         v.put("cached", 1);
-        if (c.title.isEmpty() && title != null && !title.isEmpty()) {
+        // A chapter found through a "next" link is named by its page, so loading it again may rename it (the first
+        // answer may have been something else). A title from a chapter list only gives way to a proper one.
+        boolean rename = force && title != null && !title.equals(c.title)
+                && (b.linked || (!Texts.isChapterTitle(c.title) && Texts.isChapterTitle(title)));
+        if ((c.title.isEmpty() || rename) && title != null && !title.isEmpty()) {
             v.put("title", title);
             c.title = title;
         }

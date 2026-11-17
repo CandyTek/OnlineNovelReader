@@ -118,6 +118,7 @@ public final class HeuristicEngine {
                 c.nextInChapter = nav.nextInChapter;
                 c.nextHijacked = nav.next == null && nav.nextOffsite;
                 c.tocUrl = nav.toc;
+                c.errorPage = ErrorPage.looksLike(docTitle, chapterTitle, text);
                 r.chapter = c;
                 r.contentSelector = content.byRule ? null : Dom.stableSelector(content.el, doc);
                 if (wl >= 400) cs += 40;
@@ -166,7 +167,7 @@ public final class HeuristicEngine {
         r.chapterScore = cs;
         r.detailScore = ds;
 
-        boolean chapterOk = r.chapter != null && cs >= 60
+        boolean chapterOk = r.chapter != null && cs >= 60 && !r.chapter.errorPage
                 && (r.chapter.wlen >= 120 || (content.byRule && nav.hasChapterNav));
         boolean detailOk = ds >= 50 && (toc != null || (ogNovel && meta.containsKey("og:novel:book_name")));
         if (chapterOk && detailOk) {

@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android">
+    <PreferenceCategory android:title="@string/pref_cat_reading">
+        <SwitchPreference
+            android:defaultValue="false"
+            android:key="resume_reading"
+            android:summary="@string/pref_resume_sum"
+            android:title="@string/pref_resume" />
+    </PreferenceCategory>
     <PreferenceCategory android:title="@string/pref_cat_browser">
         <ListPreference
             android:defaultValue="bing"
@@ -29,6 +36,10 @@
             android:key="new_window_same_tab"
             android:summary="@string/pref_same_tab_sum"
             android:title="@string/pref_same_tab" />
+        <Preference
+            android:key="long_press"
+            android:summary="@string/pref_long_press_sum"
+            android:title="@string/pref_long_press" />
         <Preference
             android:key="default_browser"
             android:title="@string/pref_default_browser" />

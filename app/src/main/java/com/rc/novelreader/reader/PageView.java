@@ -43,6 +43,9 @@ public class PageView extends View {
         /** Must answer asynchronously with {@link #setChapter} or {@link #setError}. */
         void requestChapter(int idx);
 
+        /** The chapter on screen changed, or started, finished or failed loading (see {@link #isError}, {@link #isLoading}). */
+        void onChapterState();
+
         /** Whether the chapter may be requested before the reader gets to it (it is cached, or preloading is on). */
         boolean mayPreload(int idx);
 
@@ -77,7 +80,11 @@ public class PageView extends View {
     private static final class Slot {
         int idx;
         int state = LOADING;
-        String title = "", text, message = "";
+        String title = "", text;
+        /** ERROR: what went wrong. LOADING: what the loader is doing right now (may be empty). */
+        CharSequence message = "";
+        /** When loading began, for the "waited so long" line. */
+        long since = android.os.SystemClock.uptimeMillis();
         ChapterLayout layout;
         /** Entered backwards: show the end of the chapter once it is loaded. */
         boolean fromEnd;
@@ -102,7 +109,9 @@ public class PageView extends View {
     private final TextPaint infoPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final Paint fill = new Paint();
     private final float density;
-    private String loadingText = "…";
+    private String loadingText = "…", waitedText = "%d s";
+    private final Paint spinPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final RectF spinBox = new RectF();
     private boolean showPercent = true;
     private int battery = -1;
     private final SimpleDateFormat clock = new SimpleDateFormat("HH:mm", Locale.US);
@@ -172,8 +181,10 @@ public class PageView extends View {
         host = h;
     }
 
-    public void setLoadingText(String s) {
+    /** @param waited format with one %d (seconds), shown once a load takes long */
+    public void setLoadingText(String s, String waited) {
         loadingText = s;
+        waitedText = waited;
     }
 
     /** Whole-book progress is only meaningful when the full chapter list is known. */
@@ -256,6 +267,7 @@ public class PageView extends View {
         scrollY = 0;
         pendingOffset = Math.max(0, offset);
         host.requestChapter(idx);
+        host.onChapterState();
         invalidate();
     }
 
@@ -277,16 +289,50 @@ public class PageView extends View {
             applyPendingOffset();
             ensureNeighbours();
             notifyPosition();
+            host.onChapterState();
         }
         invalidate();
     }
 
-    public void setError(int idx, String message) {
+    public void setError(int idx, CharSequence message) {
         Slot s = slot(idx);
         if (s == null) return;
         s.state = ERROR;
         s.message = message == null ? "" : message;
         s.layout = null;
+        if (s == cur) host.onChapterState();
+        invalidate();
+    }
+
+    /**
+     * The chapter is being fetched again: its text leaves the screen so that the wait is visible, and comes
+     * back at the same place with {@link #setChapter} (or as it was, when the host hands the old text back).
+     */
+    public void setLoading(int idx) {
+        Slot s = slot(idx);
+        if (s == null) return;
+        if (s == cur) {
+            dropSelection();
+            finishAnimation();
+            scroller.forceFinished(true);
+            if (s.state == READY && s.layout != null && pendingOffset < 0) pendingOffset = currentOffset();
+            // the message is drawn where the text starts
+            page = 0;
+            scrollY = 0;
+        }
+        s.state = LOADING;
+        s.message = "";
+        s.since = android.os.SystemClock.uptimeMillis();
+        s.layout = null;
+        if (s == cur) host.onChapterState();
+        invalidate();
+    }
+
+    /** One line under "Loading" that says what is going on (which step, which attempt). */
+    public void setLoadingDetail(int idx, CharSequence detail) {
+        Slot s = slot(idx);
+        if (s == null || s.state != LOADING) return;
+        s.message = detail == null ? "" : detail;
         invalidate();
     }
 
@@ -316,12 +362,21 @@ public class PageView extends View {
 
     /** One page forward/back (volume keys, tap zones). */
     public void turn(boolean forward) {
+        turn(forward, 0.85f);
+    }
+
+    /** A few lines forward/back (arrow keys): only scroll mode can move by less than a page. */
+    public void nudge(boolean forward) {
+        turn(forward, 0.22f);
+    }
+
+    private void turn(boolean forward, float part) {
         if (cur == null) return;
         if (mode == SCROLL) {
-            int dy = Math.round((contentBottom - contentTop) * 0.85f) * (forward ? 1 : -1);
+            int dy = Math.round((contentBottom - contentTop) * part) * (forward ? 1 : -1);
             scroller.forceFinished(true);
             lastFlingY = 0;
-            scroller.startScroll(0, 0, 0, dy, 260);
+            scroller.startScroll(0, 0, 0, dy, part < 0.5f ? 140 : 260);
             postInvalidateOnAnimation();
             return;
         }
@@ -383,9 +438,16 @@ public class PageView extends View {
     public void retry() {
         if (cur != null && cur.state == ERROR) {
             cur.state = LOADING;
+            cur.message = "";
+            cur.since = android.os.SystemClock.uptimeMillis();
             host.requestChapter(cur.idx);
+            host.onChapterState();
             invalidate();
         }
+    }
+
+    public boolean isLoading() {
+        return cur != null && cur.state == LOADING;
     }
 
     public boolean isError() {
@@ -409,10 +471,10 @@ public class PageView extends View {
         contentTop = safeTop + extraTop + Math.round((header ? 34 : 12) * density);
         contentBottom = h - safeBottom - extraBottom - Math.round((footer ? 30 : 12) * density);
         if (contentBottom - contentTop < 60 * density) contentBottom = contentTop + Math.round(60 * density);
-        bgBitmap = Backgrounds.get(ReaderPrefs.theme(), w, h, () -> {
-            bgBitmap = Backgrounds.get(ReaderPrefs.theme(), getWidth(), getHeight(), null);
+        useBackground(Backgrounds.get(ReaderPrefs.theme(), w, h, () -> {
+            useBackground(Backgrounds.get(ReaderPrefs.theme(), getWidth(), getHeight(), null));
             invalidate();
-        });
+        }));
         for (Slot s : new Slot[]{prev, cur, next}) if (s != null && s.state == READY) layout(s);
         applyPendingOffset();
         invalidate();
@@ -430,6 +492,7 @@ public class PageView extends View {
             if (mode == SCROLL) scrollY = cur.layout.yOfOffset(pendingOffset);
             else page = cur.layout.pageOfOffset(pendingOffset) / cols;
             pendingOffset = -1;
+            sweep = 0;
         }
         page = Math.max(0, Math.min(page, pages(cur) - 1));
         if (mode == SCROLL) clampScroll(false);
@@ -460,6 +523,7 @@ public class PageView extends View {
         int w = getWidth();
         if (dragDir == 0 || targetSlot == null) {
             drawPage(c, cur, page, 0);
+            drawSweep(c);
             drawHandles(c);
             return;
         }
@@ -513,16 +577,55 @@ public class PageView extends View {
     }
 
     private void drawMessage(Canvas c, Slot s, float y) {
-        String msg = s.state == ERROR ? s.message : loadingText;
+        CharSequence msg = s.message;
+        // across the whole page, also where the text is set in two columns: the buttons under it are centred too
+        int wide = Math.max(Math.max(contentW, 10), getWidth() - marginL - marginR);
+        if (s.state != ERROR) {
+            // a turning ring: the page is alive even when the site takes its time
+            long now = android.os.SystemClock.uptimeMillis();
+            float r = 11 * density, cx = marginL + wide / 2f, cy = y - r - 10 * density;
+            spinPaint.setStyle(Paint.Style.STROKE);
+            spinPaint.setStrokeWidth(2.5f * density);
+            spinPaint.setStrokeCap(Paint.Cap.ROUND);
+            spinPaint.setColor((fg & 0x00FFFFFF) | 0x90000000);
+            spinBox.set(cx - r, cy - r, cx + r, cy + r);
+            c.drawArc(spinBox, (now % 900) * 0.4f, 270, false, spinPaint);
+            postInvalidateDelayed(40);
+            // first what everybody understands, then (smaller) the step it is at and how long it has taken
+            StringBuilder small = new StringBuilder(msg);
+            long waited = (now - s.since) / 1000;
+            if (waited >= 4) small.append(small.length() > 0 ? "\n" : "").append(String.format(Locale.US, waitedText, waited));
+            android.text.SpannableStringBuilder sb = new android.text.SpannableStringBuilder(loadingText);
+            if (small.length() > 0) {
+                sb.append("\n").append(small);
+                sb.setSpan(new android.text.style.RelativeSizeSpan(0.82f), loadingText.length(), sb.length(), 0);
+            }
+            msg = sb;
+        }
         TextPaint p = new TextPaint(paint);
         p.setTextSize(15 * density);
         p.setColor((fg & 0x00FFFFFF) | 0xB0000000);
-        StaticLayout l = StaticLayout.Builder.obtain(msg, 0, msg.length(), p, Math.max(contentW, 10))
+        StaticLayout l = StaticLayout.Builder.obtain(msg, 0, msg.length(), p, wide)
                 .setAlignment(Layout.Alignment.ALIGN_CENTER).setLineSpacing(0, 1.4f).build();
         c.save();
         c.translate(marginL, y);
         l.draw(c);
         c.restore();
+    }
+
+    /** A paper texture is a tile repeated over the page at the screen's density, a picture fills the page. */
+    private void useBackground(Bitmap b) {
+        bgBitmap = b;
+        if (b != null && Backgrounds.tiled(ReaderPrefs.theme())) {
+            android.graphics.BitmapShader s = new android.graphics.BitmapShader(b,
+                    android.graphics.Shader.TileMode.REPEAT, android.graphics.Shader.TileMode.REPEAT);
+            android.graphics.Matrix m = new android.graphics.Matrix();
+            m.setScale(density / Backgrounds.TILE_DENSITY, density / Backgrounds.TILE_DENSITY);
+            s.setLocalMatrix(m);
+            bgPaint.setShader(s);
+        } else {
+            bgPaint.setShader(null);
+        }
     }
 
     private void drawBackground(Canvas c) {
@@ -531,9 +634,16 @@ public class PageView extends View {
         c.drawRect(0, 0, w, h, fill);
         Bitmap b = bgBitmap;
         if (b == null || b.isRecycled()) return;
+        if (bgPaint.getShader() != null) {
+            c.drawRect(0, 0, w, h, bgPaint);
+            return;
+        }
         // fill the page, cropping what does not fit
         int bw = b.getWidth(), bh = b.getHeight();
-        if ((long) bw * h > (long) bh * w) {
+        if (Backgrounds.sheet(ReaderPrefs.theme())) {
+            // a sheet of paper has edges of its own: all four stay, whatever the shape of the screen
+            bgSrc.set(0, 0, bw, bh);
+        } else if ((long) bw * h > (long) bh * w) {
             int cw = Math.max(1, (int) ((long) bh * w / h));
             bgSrc.set((bw - cw) / 2, 0, (bw - cw) / 2 + cw, bh);
         } else {
@@ -664,6 +774,8 @@ public class PageView extends View {
     private void commit() {
         if (targetSlot == null) return;
         dropSelection();
+        sweep = 0;
+        boolean other = targetSlot != cur;
         if (targetSlot == cur) {
             page = targetPage;
         } else if (dragDir > 0) {
@@ -684,6 +796,7 @@ public class PageView extends View {
         dragDx = 0;
         ensureNeighbours();
         notifyPosition();
+        if (other) host.onChapterState();
     }
 
     private void animateTo(final boolean complete) {
@@ -798,7 +911,10 @@ public class PageView extends View {
             }
             break;
         }
-        if (changed) ensureNeighbours();
+        if (changed) {
+            ensureNeighbours();
+            host.onChapterState();
+        }
         notifyPosition();
     }
 
@@ -1003,10 +1119,9 @@ public class PageView extends View {
 
     private void act(int action) {
         if (cur == null) return;
-        if (action == ReaderPrefs.Z_MENU) {
-            if (cur.state == ERROR) retry();
-            else host.onCenterTap();
-        } else if (action == ReaderPrefs.Z_PREV) turn(false);
+        // a failed chapter has its own retry button; the menu must stay reachable there (contents, browser, leaving)
+        if (action == ReaderPrefs.Z_MENU) host.onCenterTap();
+        else if (action == ReaderPrefs.Z_PREV) turn(false);
         else if (action == ReaderPrefs.Z_NEXT) turn(true);
         else if (action != ReaderPrefs.Z_NONE) host.onAction(action);
     }
@@ -1037,28 +1152,97 @@ public class PageView extends View {
         c.drawRect(0, rulerY + half, getWidth(), getHeight(), fill);
     }
 
-    private float autoPx;
+    // Reading by itself, the two forms other readers have settled on: in scroll mode the text moves up steadily;
+    // on pages a line travels down the page and uncovers the next page behind it (Legado's AutoPager, the
+    // "rolling blind" of Moon+ Reader), so the eye never loses its place to a sudden turn.
+
+    private float autoPx, sweepSec;
+    /** Columns of the next page uncovered so far, 0..cols. */
+    private float sweep;
+    private boolean autoPaused;
     private long autoAt;
     private final Runnable autoFrame = new Runnable() {
         @Override
         public void run() {
-            if (autoPx <= 0 || mode != SCROLL || cur == null) return;
+            if ((autoPx <= 0 && sweepSec <= 0) || cur == null) return;
             long now = android.os.SystemClock.uptimeMillis();
             float dt = Math.min(100, now - autoAt) / 1000f;
             autoAt = now;
             // a finger on the screen, a menu or a selection holds the text still
-            if (!touching && !menuOpen && selSlot == null && scroller.isFinished()) scrollBy(autoPx * dt);
+            boolean free = !autoPaused && !touching && !menuOpen && selSlot == null;
+            if (mode == SCROLL) {
+                if (free && autoPx > 0 && scroller.isFinished()) scrollBy(autoPx * dt);
+            } else if (free && sweepSec > 0 && animator == null && dragDir == 0 && cur.state == READY) {
+                sweep += dt * cols / sweepSec;
+                // The end of the chapter is on screen: its successor is what the reader is about to turn to,
+                // the same moment scroll mode asks for it.
+                if (page + 1 >= pages(cur) && cur.idx + 1 < host.chapterCount() && (next == null || next.idx != cur.idx + 1)) {
+                    next = request(cur.idx + 1, false);
+                }
+                if (sweep >= cols) {
+                    sweep = 0;
+                    if (pickTarget(1)) commit();
+                }
+                invalidate();
+            }
             postOnAnimation(this);
         }
     };
 
-    /** Scroll mode only: moves the text up steadily at this many pixels per second; 0 stops. */
-    public void setAutoScroll(float pxPerSecond) {
-        removeCallbacks(autoFrame);
+    /**
+     * Starts, retunes or (both 0) stops reading by itself.
+     *
+     * @param pxPerSecond scroll mode: how fast the text moves up
+     * @param secPerPage  paged modes: how long the line takes down one page; 0 leaves the pages alone
+     */
+    public void setAuto(float pxPerSecond, float secPerPage) {
+        boolean ran = autoPx > 0 || sweepSec > 0;
         autoPx = pxPerSecond;
-        if (pxPerSecond > 0) {
+        sweepSec = secPerPage;
+        if (secPerPage <= 0) sweep = 0;
+        if (autoPx <= 0 && sweepSec <= 0) {
+            removeCallbacks(autoFrame);
+            autoPaused = false;
+        } else if (!ran) {
             autoAt = android.os.SystemClock.uptimeMillis();
             postOnAnimation(autoFrame);
+        }
+        invalidate();
+    }
+
+    public void setAutoPaused(boolean paused) {
+        autoPaused = paused;
+    }
+
+    /** The part of the next page the line has passed, over the page being read. */
+    private void drawSweep(Canvas c) {
+        if (sweepSec <= 0 || sweep <= 0 || cur.state != READY || selSlot != null) return;
+        Slot s = null;
+        int pg = 0;
+        if (page + 1 < pages(cur)) {
+            s = cur;
+            pg = page + 1;
+        } else if (next != null && next.idx == cur.idx + 1 && next.state == READY) {
+            s = next;
+        }
+        int w = getWidth();
+        float colH = contentBottom - contentTop, line = Math.max(1, density);
+        for (int k = 0; k < cols; k++) {
+            float part = Math.min(1, sweep - k);
+            if (part <= 0) break;
+            // two columns are read one after the other, so the line goes down the left one first
+            float left = k == 0 ? 0 : colX(k) - gutter / 2f, right = k == cols - 1 ? w : colX(k) + contentW + gutter / 2f;
+            float y = contentTop + colH * part;
+            if (s != null) {
+                c.save();
+                c.clipRect(left, contentTop, right, y);
+                drawPage(c, s, pg, 0);
+                c.restore();
+            }
+            if (part < 1) {
+                fill.setColor((fg & 0x00FFFFFF) | 0x55000000);
+                c.drawRect(left, y, right, y + line, fill);
+            }
         }
     }
 

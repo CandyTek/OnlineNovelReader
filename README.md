@@ -24,6 +24,9 @@ background tabs cost nothing until shown (at most six stay live, older ones relo
 
 - **Tabs** - switcher sheet, background and incognito tabs, links that ask for a new window open as child tabs
   (Back returns to the parent), reopen closed tab, session restore, crash recovery of a single tab.
+  Swipe left or right along the address bar for the neighbouring tab (the page follows the finger; swipe down
+  for the tab list), or swipe on the tab button to step through several tabs; a label shows where you will
+  land and the tab changes when the finger lifts.
 - **Address bar** - URL or search, suggestions from bookmarks, history and the search engine, paste-and-go,
   security icon with certificate details, bookmark star, per-page blocked counter.
 - **Start page** - search box, bookmark tiles, most visited sites, shortcuts to the bookshelf and library.
@@ -31,6 +34,10 @@ background tabs cost nothing until shown (at most six stay live, older ones relo
   bookmarks, history, start-page tiles, address suggestions and the tab list.
 - **Library** (`LibraryActivity`) - bookmarks (edit, import/export as a standard bookmarks HTML file), history,
   downloads (system download manager: progress, open, delete) and saved offline pages, all searchable.
+- **Long-press actions** - holding any of the five bottom buttons or the reload button runs an action of your
+  choice (Settings > "Long-press actions of the buttons"): tabs, navigation, lists, page switches, and the
+  novel actions (bookshelf, reading mode, detect novel, continue the book read last). Defaults: Back closes
+  the tab, Forward opens the history, Home opens the bookshelf, Tabs opens a new tab.
 - **Page tools** - find in page, share, long-press menus for links and images, desktop site, night mode
   (colour inversion), no-images mode, text zoom, per-site JavaScript switch, view source, save as PDF, save
   offline (MHT), add to home screen, full-screen browsing, full-screen video, file upload.
@@ -89,6 +96,11 @@ continuous vertical scroll, keeping the previous and next chapter loaded so turn
 chapter boundary. `ReaderActivity` adds the menus: contents drawer (cached chapters highlighted,
 reversible), chapter slider, font size, line spacing, themes with a night toggle, brightness, volume-key
 paging, reload chapter, open the original page.
+While a chapter loads the page shows a spinner, the step the fetch is at (contacting the site, background
+browser, retry after an ad, looking for the next chapter) and the seconds waited. A chapter that fails says
+why in plain words with the technical detail underneath, and offers Retry and Open in browser; a site's
+error page (HTTP error status, or a "not found / try again / loading" page in the reader's template) is
+never stored as a chapter.
 Reading position (chapter + text offset) is restored exactly, also after changing the font.
 
 Behind "More" in the reading menu:
@@ -97,8 +109,15 @@ Behind "More" in the reading menu:
   Default: left column back, right column forward, centre menu; one tap sets "everything but the centre
   turns forward".
 - **Fonts**: system, serif, monospace, or any imported TTF/OTF file.
-- **Themes**: five flat colours, four paper textures (parchment, aged parchment, rice paper, kraft; computed
-  in the app, no picture files), and your own: background colour, text colour, a texture or a picture.
+- **Themes**: five flat colours, one theme for every picture in `app/src/main/assets/paper` (ten now: five
+  seamless paper textures from [ambientCG](https://ambientcg.com), CC0, and five sheets of old paper from
+  papertexture.io; see the `LICENSE.txt` there), and your own: background colour, text colour, one of those
+  papers or a picture. Adding a background to the app is dropping a `.jpg` or `.webp` into that folder: a
+  picture that repeats seamlessly is tiled and takes the theme's colour, any other is shown as one page.
+- **Keyboard**: arrows, PageUp/PageDown, Space and Enter turn pages (in scroll mode the up/down arrows move a
+  few lines); `[` `]` or Ctrl+arrows change chapter; Home, M/F10 (menu), T (contents), N (night), F (search),
+  B (bookmark), S (read aloud), A (auto scroll; Space pauses it), +/- (text size), Esc. The list is under Controls.
+- **Settings** opens the app settings without leaving the book.
 - **Layout**: left/right/top/bottom margins, line, paragraph and letter spacing, first-line indent, bold,
   header and footer on or off.
 - **Screen**: stays on always, for N minutes after the last touch (default 10), or as the system decides;
@@ -111,7 +130,7 @@ Behind "More" in the reading menu:
 - **Selection**: long-press selects a sentence, drag or use the handles to extend it over paragraphs; then
   copy, share, read aloud from there, replace or hide. Replacements (plain or regular expression, for one
   book or all) are listed and edited under "Text replacements"; they never change the cached text.
-- Bookmarks, search in the cached chapters, automatic page turning.
+- Bookmarks, search in the cached chapters.
 - **Page curl**: a fifth page-turn mode with a folding page, its shadow and the print showing through.
 - **Two pages side by side** when the screen is wide (landscape tablets); can be switched off.
 - **Highlights and notes**: five colours, a note per highlight, a list per book, export as text. Tap a
@@ -123,7 +142,12 @@ Behind "More" in the reading menu:
 - **Gestures**: every tap zone, swipe up, swipe down and double tap can open the menu, turn a page, change
   chapter, open the contents, switch night mode, add a bookmark, start reading aloud, start auto page, search
   or leave. A drag along the left edge can set the brightness.
-- **Automatic scrolling** in scroll mode: steady movement, speed changed with the volume keys while it runs.
+- **Automatic scrolling** in every page mode (More > Auto scroll, the A key, or a tap zone / gesture). Scroll
+  mode moves the text up steadily. The page modes send a line down the page that uncovers the next page behind
+  it (as Legado and Moon+ Reader do), left column first when two are shown; this can be switched to a plain
+  turn when the time is up. While it runs, a tap on the menu zone opens a strip with speed, pause, stop and
+  menu; the volume keys change the speed, Space pauses, a finger on the page holds it. It runs on into the
+  next chapter and stops at the end of the book.
 - **Speed reading**: the chapter flashed piece by piece at a set pace.
 - **Reading ruler**: everything but a movable band of lines is dimmed.
 - **Simplified / traditional Chinese** conversion (character table from OpenCC, Apache-2.0).
@@ -148,6 +172,8 @@ update checks (manual; automatic every 2 hours only if switched on) with "N new"
 clear cache / TXT export / remove. `DownloadService` caches chapters in a foreground service
 (3 workers, stops itself if the site starts refusing requests). Chapter text is stored as files,
 everything else in SQLite (`data/Db`).
+With Settings > Reading > "Continue reading on start" (off by default) starting the app opens the book read
+last instead of the shelf; Back from it leads to the shelf as usual.
 
 ## Custom site rules
 

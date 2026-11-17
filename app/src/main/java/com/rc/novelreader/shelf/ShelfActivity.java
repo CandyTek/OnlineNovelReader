@@ -55,6 +55,9 @@ public class ShelfActivity extends Activity implements Events.Listener {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_shelf);
+        // a start from the launcher: not a file handed over, not the browser's shelf button
+        ReaderActivity.resumeOnStart(this, Intent.ACTION_MAIN.equals(getIntent().getAction())
+                && getIntent().hasCategory(Intent.CATEGORY_LAUNCHER), savedInstanceState != null);
         status = findViewById(R.id.status);
         empty = findViewById(R.id.empty);
         search = findViewById(R.id.search);
@@ -108,6 +111,7 @@ public class ShelfActivity extends Activity implements Events.Listener {
             return true;
         });
 
+        App.numpadEnter(search);
         search.setOnEditorActionListener((v, actionId, event) -> {
             if (actionId == EditorInfo.IME_ACTION_SEARCH || actionId == EditorInfo.IME_ACTION_GO
                     || (event != null && event.getKeyCode() == KeyEvent.KEYCODE_ENTER && event.getAction() == KeyEvent.ACTION_DOWN)) {
@@ -132,6 +136,8 @@ public class ShelfActivity extends Activity implements Events.Listener {
     @Override
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
+        // brought back for a file, not started by the user
+        leftByBack = false;
         openFile(intent);
     }
 
@@ -328,8 +334,24 @@ public class ShelfActivity extends Activity implements Events.Listener {
      */
     @Override
     public void onBackPressed() {
+        leftByBack = true;
         if (BrowserActivity.alive) moveTaskToBack(true);
         else super.onBackPressed();
+    }
+
+    /**
+     * Back on the shelf leaves the app, but the shelf often lives on: we hide the task while the browser is
+     * alive, and Android 12+ hides a launcher task instead of ending it. Coming back is then a start of the app
+     * to the user (and gets "continue reading on start"), unlike a return after Home or from another app.
+     */
+    private boolean leftByBack;
+
+    @Override
+    protected void onRestart() {
+        super.onRestart();
+        if (!leftByBack) return;
+        leftByBack = false;
+        ReaderActivity.resumeOnStart(this, true, false);
     }
 
     @Override
