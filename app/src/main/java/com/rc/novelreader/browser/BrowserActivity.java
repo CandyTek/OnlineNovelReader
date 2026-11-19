@@ -94,11 +94,11 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public class BrowserActivity extends Activity {
     public static final String EXTRA_QUERY = "q";
-    private static final int REQ_FILE = 11, REQ_PERM = 12;
+    private static final int REQ_FILE = 11, REQ_PERM = 12, REQ_SCAN = 13;
     /** WebViews kept alive at once; older tabs are put to sleep and reload when shown. */
     private static final int MAX_LIVE = 6;
 
-    private final List<Tab> tabs = new ArrayList<>();
+    final List<Tab> tabs = new ArrayList<>();
     private final ArrayDeque<String> closed = new ArrayDeque<>();
     private Tab cur;
 
@@ -108,8 +108,11 @@ public class BrowserActivity extends Activity {
     private EditText urlBox, findText;
     private ProgressBar progress;
     private TextView fab, blockedBadge, tabCount, findCount;
-    private ImageButton btnReload, btnBack, btnForward, btnStar, btnClear, siteIcon;
+    private ImageButton btnReload, btnBack, btnForward, btnStar, btnRead, btnClear, siteIcon;
     private ListView suggestList;
+    private TabSwitcher switcher;
+    /** What the icon in front of the address shows now ("e:" + engine while it is the search engine's). */
+    private String siteIconKey;
 
     private boolean homeDirty = true, fullscreen;
     private String starUrl;
@@ -176,7 +179,9 @@ public class BrowserActivity extends Activity {
         btnBack = findViewById(R.id.btnBack);
         btnForward = findViewById(R.id.btnForward);
         btnStar = findViewById(R.id.btnStar);
+        btnRead = findViewById(R.id.btnRead);
         btnClear = findViewById(R.id.btnClear);
+        switcher = new TabSwitcher(this, (ViewGroup) customBox.getParent(), (View) topBar.getParent(), (View) webHolder.getParent());
         siteIcon = findViewById(R.id.siteIcon);
         suggestList = findViewById(R.id.suggest);
         suggestList.setAdapter(suggestAdapter);
@@ -223,8 +228,24 @@ public class BrowserActivity extends Activity {
         btnClear.setOnClickListener(v -> urlBox.setText(""));
         btnStar.setOnClickListener(v -> toggleBookmark());
         siteIcon.setOnClickListener(v -> {
-            if (cur.isHome()) focusUrl();
+            // while it is the search engine's icon, it opens the list of engines
+            if (urlBox.hasFocus() || (cur.isHome() && !cur.incognito)) {
+                SearchEngines.pick(this, siteIcon, () -> {
+                    siteIconKey = null;
+                    homeDirty = true;
+                    refreshUi();
+                    if (urlBox.hasFocus()) updateSuggestions();
+                });
+            } else if (cur.isHome()) focusUrl();
             else showPageInfo();
+        });
+        // always there on a page: a novel that was found opens, anything else is looked at now
+        btnRead.setOnClickListener(v -> {
+            if (cur.sniffed != null) enterReadingMode();
+            else if (cur.web != null) {
+                App.toast(getString(R.string.sniffing));
+                cur.sniffThenRead();
+            }
         });
         btnReload.setOnClickListener(v -> {
             if (cur.web == null) return;
@@ -252,8 +273,8 @@ public class BrowserActivity extends Activity {
 
         // "browser_front" still set: the last process died with the browser on screen (see saveTabsSoon), which
         // is the same loss as the system recreating it, so the tabs come back the same way
-        if (savedInstanceState != null || App.prefs().getBoolean("restore_tabs", false)
-                || App.prefs().getBoolean("browser_front", false)) restoreTabs();
+        restoreTabs(savedInstanceState != null || App.prefs().getBoolean("restore_tabs", false)
+                || App.prefs().getBoolean("browser_front", false));
         alive = true;
         handleIntent(getIntent());
         com.rc.novelreader.reader.ReaderActivity.resumeAfterKill(this);
@@ -290,8 +311,8 @@ public class BrowserActivity extends Activity {
                 refreshUi();
             } else openTab(u, null, false, false);
         } else if (cur == null) {
-            if (tabs.isEmpty()) openTab(null, null, false, false);
-            else switchTo(tabs.get(tabs.size() - 1));
+            // the tabs of last time wait in the tab list; none of them is loaded for having been open
+            openTab(null, null, false, false);
         }
     }
 
@@ -314,11 +335,13 @@ public class BrowserActivity extends Activity {
         }
         homeDirty = true;
         starUrl = null;
+        siteIconKey = null;
         if (cur != null) refreshUi();
     }
 
     @Override
     protected void onPause() {
+        snapshot();
         if (cur != null && cur.web != null) cur.web.onPause();
         if (customView != null) hideCustomView();
         saveTabs();
@@ -357,7 +380,14 @@ public class BrowserActivity extends Activity {
         return t;
     }
 
-    private void switchTo(Tab t) {
+    /** Keeps a small picture of what the tab in front shows, for the tab views. */
+    void snapshot() {
+        if (cur == null || customView != null) return;
+        TabThumbs.capture(cur, cur.isHome() ? home : cur.web);
+    }
+
+    void switchTo(Tab t) {
+        if (cur != null && cur != t) snapshot();
         if (cur != null && cur != t && cur.web != null) cur.web.onPause();
         closeFind();
         cur = t;
@@ -379,20 +409,21 @@ public class BrowserActivity extends Activity {
         if (urlBox.hasFocus()) blurUrl();
         starUrl = null;
         refreshUi();
+        // which tab is in front is part of what is restored
+        saveTabsSoon();
     }
 
     // ------------------------------------------------------------------ swiping between tabs
     //
-    // Along the address bar, as in Chrome for Android: left or right is the neighbouring tab and the page follows
-    // the finger; down opens the tab list. On the tab button, as in Alook: the further the finger goes, the more
-    // tabs it passes. The tab is only switched to when the finger lifts: a sleeping tab reloads when it is
-    // shown, and the tabs passed on the way were not asked for.
+    // Along the address bar: the page becomes a card in a row of tab pictures that follows the finger (see
+    // TabSwitcher, after the recent-apps view of Android); down opens the tab grid. On the tab button the same
+    // row moves faster, so a short swipe crosses many tabs. The tab is only switched to when the finger lifts:
+    // a sleeping tab reloads when it is shown, and the tabs passed on the way were not asked for.
 
     private static final int SWIPE_BAR = 1, SWIPE_BUTTON = 2, SWIPE_EAT = -1;
-    private int swipeZone, swipeBy;
+    private int swipeZone;
     private boolean swiping;
     private float swipeX, swipeY;
-    private TextView swipeTip;
 
     @Override
     public boolean dispatchTouchEvent(android.view.MotionEvent e) {
@@ -400,10 +431,9 @@ public class BrowserActivity extends Activity {
         float x = e.getRawX(), y = e.getRawY();
         if (action == android.view.MotionEvent.ACTION_DOWN) {
             swiping = false;
-            swipeBy = 0;
             swipeX = x;
             swipeY = y;
-            swipeZone = cur == null || customView != null || urlBox.hasFocus() ? 0
+            swipeZone = cur == null || customView != null || urlBox.hasFocus() || switcher.gridShown() || switcher.swiping() ? 0
                     : inside(topBar, x, y) ? SWIPE_BAR : inside(findViewById(R.id.btnTabs), x, y) ? SWIPE_BUTTON : 0;
             return super.dispatchTouchEvent(e);
         }
@@ -433,32 +463,16 @@ public class BrowserActivity extends Activity {
             }
             swiping = true;
             swipeX = x;
+            switcher.swipeBegin(tabs.indexOf(cur));
             return true;
         }
-        final View content = (View) webHolder.getParent();
-        int idx = tabs.indexOf(cur), n = tabs.size();
         if (!end) {
-            if (swipeZone == SWIPE_BAR) {
-                // one tab per swipe; a page with no neighbour on that side only gives a little
-                boolean has = dx < 0 ? idx + 1 < n : idx > 0;
-                swipeBy = !has || Math.abs(dx) < App.dp(48) ? 0 : dx < 0 ? 1 : -1;
-                content.setTranslationX(has ? dx : dx * 0.2f);
-            } else {
-                swipeBy = Math.max(-idx, Math.min(n - 1 - idx, Math.round(-dx / App.dp(28))));
-            }
-            showSwipeTip(swipeBy == 0 ? null : tabs.get(idx + swipeBy), idx + swipeBy, n);
+            switcher.swipeMove(dx, swipeZone == SWIPE_BUTTON);
             return true;
         }
         swipeZone = 0;
         swiping = false;
-        showSwipeTip(null, 0, 0);
-        if (action == android.view.MotionEvent.ACTION_UP && swipeBy != 0 && idx >= 0) {
-            switchTo(tabs.get(idx + swipeBy));
-            // the new page comes in from the side the finger pulled it from
-            content.setTranslationX((swipeBy > 0 ? 1 : -1) * content.getWidth() * 0.3f);
-            content.setAlpha(0.3f);
-        }
-        content.animate().translationX(0).alpha(1f).setDuration(170).start();
+        switcher.swipeEnd(action == android.view.MotionEvent.ACTION_CANCEL);
         return true;
     }
 
@@ -469,31 +483,6 @@ public class BrowserActivity extends Activity {
         return rawX >= at[0] && rawX < at[0] + v.getWidth() && rawY >= at[1] && rawY < at[1] + v.getHeight();
     }
 
-    /** Where the swipe would land: "3 / 7" and the tab's name, over the page. */
-    private void showSwipeTip(Tab t, int idx, int count) {
-        if (t == null) {
-            if (swipeTip != null) swipeTip.setVisibility(View.GONE);
-            return;
-        }
-        if (swipeTip == null) {
-            swipeTip = new TextView(this);
-            swipeTip.setTextSize(13);
-            swipeTip.setTextColor(Color.WHITE);
-            swipeTip.setSingleLine(true);
-            swipeTip.setEllipsize(android.text.TextUtils.TruncateAt.END);
-            swipeTip.setMaxWidth(App.dp(300));
-            swipeTip.setPadding(App.dp(14), App.dp(8), App.dp(14), App.dp(8));
-            swipeTip.setBackgroundResource(R.drawable.tip_bg);
-            swipeTip.setElevation(App.dp(6));
-            // on the window, not on the page: the page moves with the finger
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER);
-            ((FrameLayout) findViewById(android.R.id.content)).addView(swipeTip, lp);
-        }
-        String text = (idx + 1) + " / " + count + "   " + t.label();
-        if (!text.contentEquals(swipeTip.getText())) swipeTip.setText(text);
-        swipeTip.setVisibility(View.VISIBLE);
-    }
-
     void closeTab(Tab t) {
         int idx = tabs.indexOf(t);
         if (idx < 0) return;
@@ -502,10 +491,13 @@ public class BrowserActivity extends Activity {
             if (closed.size() > 20) closed.removeLast();
         }
         t.destroyWeb();
+        t.thumb = null;
+        TabThumbs.delete(t.id);
         tabs.remove(idx);
         for (Tab x : tabs) {
             if (x.parent == t) x.parent = null;
         }
+        saveTabsSoon();
         if (t != cur) {
             tabCount.setText(String.valueOf(tabs.size()));
             return;
@@ -552,14 +544,22 @@ public class BrowserActivity extends Activity {
                 String u = t.address();
                 if (t.incognito || u.isEmpty() || !u.startsWith("http")) continue;
                 if (t == cur) current = arr.length();
-                arr.put(new JSONObject().put("u", u).put("t", t.title));
+                arr.put(new JSONObject().put("u", u).put("t", t.title).put("id", t.id));
             }
             App.prefs().edit().putString("tabs_json", arr.toString()).putInt("tabs_current", current).apply();
         } catch (Exception ignored) {
         }
     }
 
-    private void restoreTabs() {
+    /**
+     * The tabs of last time always come back, but only as entries of the tab views (with the picture kept of
+     * each): a tab is loaded when it is picked, as in Chrome, so starting the browser asks no site for
+     * anything.
+     * @param load also show the tab that was in front, which loads it (the switch "restore_tabs", or the
+     *             browser was taken away while in use)
+     */
+    private void restoreTabs(boolean load) {
+        Set<Long> ids = new HashSet<>();
         try {
             JSONArray arr = new JSONArray(App.prefs().getString("tabs_json", "[]"));
             int current = App.prefs().getInt("tabs_current", -1);
@@ -569,12 +569,15 @@ public class BrowserActivity extends Activity {
                 Tab t = new Tab(this, false);
                 t.pendingUrl = o.getString("u");
                 t.title = o.optString("t");
+                t.id = o.optLong("id", t.id);
+                ids.add(t.id);
                 tabs.add(t);
                 if (i == current) show = t;
             }
-            if (show != null) switchTo(show);
+            if (load && show != null) switchTo(show);
         } catch (Exception ignored) {
         }
+        TabThumbs.prune(ids);
     }
 
     // ------------------------------------------------------------------ navigation
@@ -605,17 +608,7 @@ public class BrowserActivity extends Activity {
     }
 
     private static String searchUrl() {
-        switch (App.prefs().getString("search_engine", "bing")) {
-            case "baidu": return "https://www.baidu.com/s?wd=%s";
-            case "google": return "https://www.google.com/search?q=%s";
-            case "ddg": return "https://duckduckgo.com/?q=%s";
-            case "sogou": return "https://www.sogou.com/web?query=%s";
-            case "custom":
-                String c = App.prefs().getString("search_custom", "").trim();
-                if (c.contains("%s") && c.startsWith("http")) return c;
-                return "https://www.bing.com/search?q=%s";
-            default: return "https://www.bing.com/search?q=%s";
-        }
+        return SearchEngines.searchUrl();
     }
 
     private boolean goBack(boolean mayFinish) {
@@ -770,6 +763,9 @@ public class BrowserActivity extends Activity {
             case "continue_reading":
                 if (!ReaderActivity.continueLast(this)) App.toast(getString(R.string.act_nothing_to_read));
                 break;
+            case "scan_qr":
+                scan();
+                break;
             default:
                 return false;
         }
@@ -832,18 +828,32 @@ public class BrowserActivity extends Activity {
         blockedBadge.setVisibility(n > 0 && !editing ? View.VISIBLE : View.GONE);
         blockedBadge.setText(String.valueOf(Math.min(n, 999)));
 
-        int icon, tint = getColor(R.color.text_secondary);
-        if (cur.incognito) icon = R.drawable.ic_incognito;
-        else if (isHome || editing) icon = R.drawable.ic_search;
-        else if (cur.secure()) {
-            icon = R.drawable.ic_lock;
-            tint = getColor(R.color.brand);
-        } else icon = R.drawable.ic_info;
-        siteIcon.setImageResource(icon);
-        siteIcon.setImageTintList(ColorStateList.valueOf(tint));
+        if (editing || (isHome && !cur.incognito)) {
+            // where a search is typed, the icon is the engine it goes to; a tap on it switches engines
+            String key = "e:" + SearchEngines.current();
+            if (!key.equals(siteIconKey)) {
+                siteIconKey = key;
+                siteIcon.setImageTintList(null);
+                siteIcon.setImageBitmap(SearchEngines.icon(SearchEngines.current(), App.dp(40)));
+                siteIcon.setContentDescription(getString(R.string.pref_search_engine) + ": " + SearchEngines.name(this));
+            }
+        } else {
+            int icon, tint = getColor(R.color.text_secondary);
+            if (cur.incognito) icon = R.drawable.ic_incognito;
+            else if (cur.secure()) {
+                icon = R.drawable.ic_lock;
+                tint = getColor(R.color.brand);
+            } else icon = R.drawable.ic_info;
+            if (siteIconKey != null) siteIcon.setContentDescription(getString(R.string.page_info));
+            siteIconKey = null;
+            siteIcon.setImageResource(icon);
+            siteIcon.setImageTintList(ColorStateList.valueOf(tint));
+        }
 
         String u = cur.url;
         btnStar.setVisibility(!editing && u.startsWith("http") ? View.VISIBLE : View.GONE);
+        btnRead.setVisibility(!editing && u.startsWith("http") ? View.VISIBLE : View.GONE);
+        btnRead.setImageTintList(ColorStateList.valueOf(getColor(cur.sniffed != null ? R.color.brand : R.color.text_secondary)));
         if (!u.equals(starUrl)) {
             starUrl = u;
             starOn = u.startsWith("http") && Db.isBookmarked(u);
@@ -935,7 +945,12 @@ public class BrowserActivity extends Activity {
         search.setGravity(Gravity.CENTER_VERTICAL);
         search.setBackgroundResource(R.drawable.field_bg);
         search.setBackgroundTintList(ColorStateList.valueOf(getColor(R.color.surface)));
-        search.setPadding(App.dp(20), 0, App.dp(20), 0);
+        search.setPadding(App.dp(14), 0, App.dp(20), 0);
+        android.graphics.drawable.BitmapDrawable engine = new android.graphics.drawable.BitmapDrawable(getResources(),
+                SearchEngines.icon(SearchEngines.current(), App.dp(44)));
+        engine.setBounds(0, 0, App.dp(22), App.dp(22));
+        search.setCompoundDrawablesRelative(engine, null, null, null);
+        search.setCompoundDrawablePadding(App.dp(10));
         search.setElevation(App.dp(1));
         search.setOnClickListener(v -> focusUrl());
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, App.dp(46));
@@ -949,6 +964,7 @@ public class BrowserActivity extends Activity {
         quick.addView(quickLink(R.drawable.ic_star, R.string.bookmarks, () -> LibraryActivity.open(this, 0)));
         quick.addView(quickLink(R.drawable.ic_history, R.string.history, () -> LibraryActivity.open(this, 1)));
         quick.addView(quickLink(R.drawable.ic_download, R.string.downloads, () -> LibraryActivity.open(this, 2)));
+        quick.addView(quickLink(R.drawable.ic_qr, R.string.scan_qr, this::scan));
         homeBox.addView(quick, new LinearLayout.LayoutParams(-1, -2));
 
         Set<String> seen = new HashSet<>();
@@ -989,7 +1005,7 @@ public class BrowserActivity extends Activity {
         return t;
     }
 
-    private int selectable() {
+    int selectable() {
         android.util.TypedValue v = new android.util.TypedValue();
         getTheme().resolveAttribute(android.R.attr.selectableItemBackground, v, true);
         return v.resourceId;
@@ -1462,6 +1478,7 @@ public class BrowserActivity extends Activity {
             cur.sniffNow();
         }));
 
+        items.add(new Item(R.drawable.ic_qr, R.string.scan_qr, false, true, this::scan));
         items.add(new Item(R.drawable.ic_add, R.string.new_tab, false, true, () -> openTab(null, null, false, false)));
         items.add(new Item(R.drawable.ic_incognito, R.string.incognito_tab, false, true, () -> openTab(null, null, true, false)));
         items.add(new Item(R.drawable.ic_undo, R.string.reopen_closed, false, !closed.isEmpty(), () -> {
@@ -1559,95 +1576,10 @@ public class BrowserActivity extends Activity {
     private void showTabs() {
         closeFind();
         if (urlBox.hasFocus()) blurUrl();
-        final LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        final Dialog d = sheet(box);
-        final Runnable[] fill = new Runnable[1];
-        fill[0] = () -> {
-            box.removeAllViews();
-            TextView head = new TextView(this);
-            head.setText(getString(R.string.tabs_title, tabs.size()));
-            head.setTextSize(15);
-            head.setTypeface(Typeface.DEFAULT_BOLD);
-            head.setTextColor(getColor(R.color.text_primary));
-            head.setPadding(App.dp(20), App.dp(16), App.dp(20), App.dp(8));
-            box.addView(head);
-
-            LinearLayout list = new LinearLayout(this);
-            list.setOrientation(LinearLayout.VERTICAL);
-            for (final Tab t : tabs) {
-                LinearLayout row = new LinearLayout(this);
-                row.setGravity(Gravity.CENTER_VERTICAL);
-                row.setPadding(App.dp(20), 0, App.dp(6), 0);
-                row.setMinimumHeight(App.dp(56));
-                row.setBackgroundResource(selectable());
-                if (t == cur) row.setBackgroundColor(getColor(R.color.field_bg));
-                ImageView icon = new ImageView(this);
-                if (t.icon != null && !t.incognito) icon.setImageBitmap(t.icon);
-                else Favicons.show(icon, t.incognito ? null : t.url.isEmpty() ? t.pendingUrl : t.url,
-                        t.incognito ? R.drawable.ic_incognito : R.drawable.ic_globe, getColor(R.color.text_secondary));
-                row.addView(icon, new LinearLayout.LayoutParams(App.dp(22), App.dp(22)));
-                LinearLayout texts = new LinearLayout(this);
-                texts.setOrientation(LinearLayout.VERTICAL);
-                texts.setPadding(App.dp(16), App.dp(8), App.dp(8), App.dp(8));
-                TextView t1 = new TextView(this), t2 = new TextView(this);
-                t1.setText(t.label());
-                t1.setTextSize(14.5f);
-                t1.setSingleLine(true);
-                t1.setEllipsize(TextUtils.TruncateAt.END);
-                t1.setTextColor(getColor(t == cur ? R.color.brand : R.color.text_primary));
-                String host = Urls.host(t.address());
-                t2.setText(t.incognito ? getString(R.string.incognito) + (host.isEmpty() ? "" : " · " + host) : host);
-                t2.setTextSize(12);
-                t2.setSingleLine(true);
-                t2.setTextColor(getColor(R.color.text_secondary));
-                t2.setVisibility(t2.length() == 0 ? View.GONE : View.VISIBLE);
-                texts.addView(t1);
-                texts.addView(t2);
-                row.addView(texts, new LinearLayout.LayoutParams(0, -2, 1));
-                ImageButton close = new ImageButton(this);
-                close.setImageResource(R.drawable.ic_close);
-                close.setImageTintList(ColorStateList.valueOf(getColor(R.color.text_secondary)));
-                close.setBackgroundResource(selectable());
-                close.setOnClickListener(v -> {
-                    closeTab(t);
-                    fill[0].run();
-                });
-                row.addView(close, new LinearLayout.LayoutParams(App.dp(48), App.dp(48)));
-                row.setOnClickListener(v -> {
-                    d.dismiss();
-                    if (t != cur) switchTo(t);
-                });
-                list.addView(row);
-            }
-            final ScrollView scroll = new ScrollView(this);
-            scroll.addView(list);
-            final int at = tabs.indexOf(cur);
-            scroll.post(() -> scroll.scrollTo(0, Math.max(0, at - 2) * App.dp(56)));
-            int max = (int) (getResources().getDisplayMetrics().heightPixels * 0.55f);
-            box.addView(scroll, new LinearLayout.LayoutParams(-1, Math.min(max, tabs.size() * App.dp(56))));
-
-            LinearLayout actions = new LinearLayout(this);
-            actions.setPadding(App.dp(8), App.dp(4), App.dp(8), App.dp(8));
-            actions.addView(sheetButton(R.drawable.ic_add, R.string.new_tab, () -> {
-                d.dismiss();
-                openTab(null, null, false, false);
-            }));
-            actions.addView(sheetButton(R.drawable.ic_incognito, R.string.incognito_tab, () -> {
-                d.dismiss();
-                openTab(null, null, true, false);
-            }));
-            actions.addView(sheetButton(R.drawable.ic_close, R.string.close_all_tabs, () -> {
-                d.dismiss();
-                closeAllTabs();
-            }));
-            box.addView(actions);
-        };
-        fill[0].run();
-        d.show();
+        switcher.showGrid();
     }
 
-    private View sheetButton(int icon, int label, final Runnable action) {
+    View sheetButton(int icon, int label, final Runnable action) {
         TextView t = new TextView(this);
         t.setText(label);
         t.setTextSize(12);
@@ -1663,9 +1595,10 @@ public class BrowserActivity extends Activity {
         return t;
     }
 
-    private void closeAllTabs() {
+    void closeAllTabs() {
         for (Tab t : new ArrayList<>(tabs)) t.destroyWeb();
         tabs.clear();
+        TabThumbs.prune(new HashSet<Long>());
         closed.clear();
         tabsCleared = false;
         cur = null;
@@ -1908,6 +1841,8 @@ public class BrowserActivity extends Activity {
                 labels.add(getString(R.string.copy_image_link));
                 actions.add(() -> copy(image));
             }
+            labels.add(getString(R.string.scan_image));
+            actions.add(() -> scanImage(image, t.url));
         }
         if (labels.isEmpty()) return;
         String title = link != null ? link : image;
@@ -1998,6 +1933,10 @@ public class BrowserActivity extends Activity {
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_SCAN) {
+            if (resultCode == RESULT_OK && data != null) onScanned(data.getStringExtra(ScanActivity.EXTRA_TEXT));
+            return;
+        }
         if (requestCode != REQ_FILE || fileCallback == null) return;
         Uri[] result = null;
         if (resultCode == RESULT_OK && data != null) {
@@ -2125,6 +2064,67 @@ public class BrowserActivity extends Activity {
 
     // ------------------------------------------------------------------ reading mode
 
+    /** The reading-mode button had the page looked at, and it is a novel. */
+    void readFrom(Tab t) {
+        if (t == cur && !isDestroyed()) enterReadingMode();
+    }
+
+    // ------------------------------------------------------------------ QR codes
+
+    private void scan() {
+        startActivityForResult(new Intent(this, ScanActivity.class), REQ_SCAN);
+    }
+
+    /** A code was read. What it says is shown first: opening or searching it is the user's tap, not the code's. */
+    private void onScanned(String text) {
+        if (text == null || text.trim().isEmpty() || isFinishing()) return;
+        final String t = text.trim();
+        final boolean address = Urls.fromInput(t) != null;
+        new AlertDialog.Builder(this).setTitle(R.string.scan_result)
+                .setMessage(t.length() > 800 ? t.substring(0, 800) + "\u2026" : t)
+                .setPositiveButton(address ? R.string.scan_open : R.string.scan_search, (d, w) -> {
+                    String u = resolve(t);
+                    if (u == null) return;
+                    if (cur != null && cur.isHome()) {
+                        cur.load(u);
+                        refreshUi();
+                    } else openTab(u, null, false, false);
+                })
+                .setNeutralButton(R.string.rd_copy, (d, w) -> {
+                    ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("text", t));
+                    App.toast(getString(R.string.rd_copied));
+                })
+                .setNegativeButton(R.string.cancel, null).show();
+    }
+
+    /** "Read the code in this picture" from the long-press menu: the picture is fetched once more for it. */
+    private void scanImage(final String image, final String referer) {
+        App.toast(getString(R.string.sniffing));
+        App.IO.execute(() -> {
+            String text = null;
+            try {
+                byte[] bytes;
+                if (image.startsWith("data:")) {
+                    int comma = image.indexOf(',');
+                    String body = image.substring(comma + 1);
+                    bytes = image.substring(0, Math.max(0, comma)).contains(";base64")
+                            ? android.util.Base64.decode(body, android.util.Base64.DEFAULT) : Uri.decode(body).getBytes("ISO-8859-1");
+                } else bytes = Http.getBytes(image, referer);
+                text = ScanActivity.decode(bytes);
+            } catch (Throwable e) {
+                android.util.Log.w("Browser", "scan image", e);
+            }
+            final String found = text;
+            App.MAIN.post(() -> {
+                if (isDestroyed()) return;
+                if (found == null) App.toast(getString(R.string.scan_none));
+                else onScanned(found);
+            });
+        });
+    }
+
+    // ------------------------------------------------------------------ reading mode (opening the book)
+
     private void enterReadingMode() {
         final PageResult r = cur.sniffed;
         if (r == null) return;
@@ -2165,11 +2165,20 @@ public class BrowserActivity extends Activity {
         super.onConfigurationChanged(newConfig);
         homeDirty = true;
         if (cur != null) refreshUi();
+        if (switcher.gridShown()) {
+            // the cards are cut to the shape of the page, which has just changed
+            switcher.dismissGrid();
+            webHolder.post(() -> {
+                if (!isDestroyed()) switcher.showGrid();
+            });
+        }
     }
 
     @Override
     public void onBackPressed() {
-        if (customView != null) hideCustomView();
+        if (switcher.gridShown()) switcher.dismissGrid();
+        else if (switcher.swiping()) return;
+        else if (customView != null) hideCustomView();
         else if (findBar.getVisibility() == View.VISIBLE) closeFind();
         else if (urlBox.hasFocus()) blurUrl();
         else if (!goBack(false)) {

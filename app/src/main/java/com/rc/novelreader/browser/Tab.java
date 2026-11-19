@@ -52,6 +52,10 @@ final class Tab {
 
     final BrowserActivity a;
     final boolean incognito;
+    /** Names the tab across restarts (its saved preview is filed under it). */
+    long id = newId();
+    /** What the tab showed when it was last left, for the tab views; null until one was taken or read back. */
+    Bitmap thumb;
     WebView web;
     /** Address of the page ("" = start page) and what to load when the tab is first shown. */
     String url = "", title = "", pendingUrl;
@@ -68,6 +72,10 @@ final class Tab {
     private String sslBadHost;
 
     int sniffSeq;
+    /** Counts page loads: what was started for an earlier page gives up. */
+    private int pageSeq;
+    /** The reading-mode button asked for this look: a novel found by it is opened at once. */
+    private boolean readAfterSniff;
     PageResult sniffed;
     /** The page has loaded but the sniffer has not yet said what it is. */
     private boolean sniffPending;
@@ -77,6 +85,15 @@ final class Tab {
     private String navUrl;
     private int navRetries;
     private static final int NAV_RETRIES = 2;
+
+    private static long lastId;
+
+    private static synchronized long newId() {
+        long n = System.currentTimeMillis();
+        if (n <= lastId) n = lastId + 1;
+        lastId = n;
+        return n;
+    }
 
     Tab(BrowserActivity a, boolean incognito) {
         this.a = a;
@@ -263,6 +280,7 @@ final class Tab {
 
     void destroyWeb() {
         sniffSeq++;
+        pageSeq++;
         sniffed = null;
         loading = starting = false;
         if (web == null) return;
@@ -340,6 +358,8 @@ final class Tab {
             cosmeticInjected = false;
             sniffed = null;
             sniffSeq++;
+            pageSeq++;
+            readAfterSniff = false;
             sniffPending = false;
             heldNavigation = null;
             a.onTabChanged(Tab.this);
@@ -348,6 +368,8 @@ final class Tab {
         @Override
         public void onPageCommitVisible(WebView view, String u) {
             inject();
+            // the new document is in place from here on: before, the script would still answer for the old one
+            if (u != null && u.startsWith("http")) watchDom(pageSeq, 0);
         }
 
         @Override
@@ -576,8 +598,40 @@ final class Tab {
         App.MAIN.postDelayed(() -> sniff(seq, false, attempt), delay);
     }
 
+    /**
+     * A page is looked at twice (owner's request): two seconds after its markup has been read
+     * (DOMContentLoaded), and again after its load event (onPageFinished). The first does not wait for
+     * pictures and ad scripts, which on some sites never finish, so the reading-mode button no longer depends
+     * on a page that "loads" for ever. This waits for the markup; it reads nothing from the network.
+     */
+    private void watchDom(final int seq, final int tries) {
+        if (seq != pageSeq || web == null || !App.prefs().getBoolean("auto_sniff", true)) return;
+        web.evaluateJavascript("document.readyState", v -> {
+            if (seq != pageSeq || web == null) return;
+            String state = WebFetcher.decodeJs(v);
+            if (state.equals("interactive") || state.equals("complete")) {
+                App.MAIN.postDelayed(() -> domScan(seq), 2000);
+            } else if (state.equals("loading") && tries < 240) {
+                App.MAIN.postDelayed(() -> watchDom(seq, tries + 1), 250);
+            }
+        });
+    }
+
+    private void domScan(int seq) {
+        if (seq != pageSeq || web == null || sniffed != null) return;
+        // while the page still loads, the look after the load event does the repeating
+        sniff(++sniffSeq, false, loading ? 2 : 1);
+    }
+
     void sniffNow() {
+        readAfterSniff = false;
         sniff(++sniffSeq, true, 9);
+    }
+
+    /** The reading-mode button on a page that was not recognised (yet): look now, and read if it is a novel. */
+    void sniffThenRead() {
+        sniff(++sniffSeq, true, 9);
+        readAfterSniff = true;
     }
 
     /** Hands the rendered DOM to the dual-engine sniffer on a background thread. */
@@ -636,6 +690,8 @@ final class Tab {
 
     private void onSniffed(int seq, PageResult r, boolean manual, int attempt) {
         if (seq != sniffSeq || web == null) return;
+        final boolean read = manual && readAfterSniff;
+        if (manual) readAfterSniff = false;
         settleHeldNavigation(r != null && r.isNovel());
         if (r != null && r.isNovel()) {
             sniffed = r;
@@ -646,11 +702,12 @@ final class Tab {
                 web.evaluateJavascript("window.__nsInstalled=false", null);
                 inject(); // re-run in strict mode now that the site is known
             }
-            if (manual) {
+            if (manual && !read) {
                 App.toast(a.getString(R.string.sniff_result, a.getString(chapter ? R.string.type_chapter : R.string.type_detail),
                         r.engine, r.confidence()));
             }
             a.onTabChanged(this);
+            if (read) a.readFrom(this);
             return;
         }
         if (manual) {

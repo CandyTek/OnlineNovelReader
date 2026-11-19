@@ -2,6 +2,7 @@ package com.rc.novelreader.reader;
 
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.os.Build;
 import android.text.Layout;
 import android.text.StaticLayout;
 import android.text.TextPaint;
@@ -30,6 +31,14 @@ final class ChapterLayout {
         int paraStart = -1;
         /** Characters of indentation put in front of the paragraph (they are not chapter text either). */
         int indentLen;
+        /**
+         * A line stretched to the right margin: x of every character from the line's start to its visible end
+         * (one more than there are characters), null when the line is drawn as the layout has it.
+         */
+        float[] xs;
+        /** Added after every character of a stretched line, and the layout index stretching starts at. */
+        float gap;
+        int stretchFrom;
     }
 
     final List<Line> lines = new ArrayList<>();
@@ -38,13 +47,13 @@ final class ChapterLayout {
     float height;
 
     static ChapterLayout build(String title, String text, TextPaint paint, TextPaint titlePaint,
-                               int width, int pageHeight, float lineMult, float paraMult, boolean indentOn) {
+                               int width, int pageHeight, float lineMult, float paraMult, boolean indentOn, boolean justify) {
         ChapterLayout cl = new ChapterLayout();
         float y = 0;
         float textSize = paint.getTextSize();
         if (title != null && !title.isEmpty()) {
             y += textSize * 0.4f;
-            StaticLayout tl = make(title, titlePaint, width, 1.25f);
+            StaticLayout tl = heading(title, titlePaint, width);
             cl.add(tl, y, -1, 0);
             y += tl.getHeight() + textSize * 1.3f;
         }
@@ -56,8 +65,11 @@ final class ChapterLayout {
             int nl = text.indexOf('\n', pos);
             if (nl < 0) nl = n;
             if (nl > pos) {
-                StaticLayout pl = make(indent + text.substring(pos, nl), paint, width, lineMult);
+                // words are spread by the layout itself; text without spaces between words is spread here
+                StaticLayout pl = make(indent + text.substring(pos, nl), paint, width, lineMult, justify && !cjk);
+                int first = cl.lines.size();
                 cl.add(pl, y, pos, indent.length());
+                if (justify && cjk) cl.stretch(first, width);
                 y += pl.getHeight() + paraGap;
             }
             pos = nl + 1;
@@ -76,8 +88,15 @@ final class ChapterLayout {
         return cl;
     }
 
-    private static StaticLayout make(String s, TextPaint paint, int width, float mult) {
-        return StaticLayout.Builder.obtain(s, 0, s.length(), paint, Math.max(width, 10))
+    /** The chapter heading as the column starts with it (0.4 of the text size below the column's top). */
+    static StaticLayout heading(String title, TextPaint titlePaint, int width) {
+        return make(title, titlePaint, width, 1.25f, false);
+    }
+
+    private static StaticLayout make(String s, TextPaint paint, int width, float mult, boolean justify) {
+        StaticLayout.Builder b = StaticLayout.Builder.obtain(s, 0, s.length(), paint, Math.max(width, 10));
+        if (justify && Build.VERSION.SDK_INT >= 26) b.setJustificationMode(Layout.JUSTIFICATION_MODE_INTER_WORD);
+        return b
                 .setAlignment(Layout.Alignment.ALIGN_NORMAL)
                 .setLineSpacing(0, mult)
                 .setIncludePad(false)
@@ -100,6 +119,43 @@ final class ChapterLayout {
             ln.offset = base + Math.max(0, l.getLineStart(i) - indentLen);
             ln.end = paraStart < 0 ? 0 : base + Math.max(0, l.getLineEnd(i) - indentLen);
             lines.add(ln);
+        }
+    }
+
+    /**
+     * Stretches the lines of the paragraph added last, except its final one, to the right margin by widening
+     * the space after every character alike. Line breaking leaves a ragged edge wherever a punctuation mark
+     * may not start a line or a narrow character (a digit, a Latin letter) sits among the wide ones.
+     */
+    private void stretch(int first, int width) {
+        for (int i = first; i < lines.size() - 1; i++) {
+            Line ln = lines.get(i);
+            StaticLayout l = ln.layout;
+            int start = l.getLineStart(ln.line), end = l.getLineVisibleEnd(ln.line);
+            int from = start + (ln.line == 0 ? ln.indentLen : 0);
+            if (end - from < 8) continue;
+            float[] adv = new float[end - start];
+            l.getPaint().getTextWidths(l.getText(), start, end, adv);
+            float natural = 0;
+            int gaps = -1;
+            for (int k = 0; k < adv.length; k++) {
+                natural += adv[k];
+                // a character without an advance of its own (second half of a pair, a combining mark) is not spaced
+                if (start + k >= from && adv[k] > 0) gaps++;
+            }
+            float slack = width - natural;
+            // a line that falls far short was broken for another reason (a long address): leave it alone
+            if (gaps < 4 || slack < 0.5f || slack > l.getPaint().getTextSize() * 3) continue;
+            ln.gap = slack / gaps;
+            ln.stretchFrom = from;
+            ln.xs = new float[adv.length + 1];
+            float x = 0;
+            for (int k = 0; k < adv.length; k++) {
+                ln.xs[k] = x;
+                x += adv[k];
+                if (start + k >= from && adv[k] > 0) x += ln.gap;
+            }
+            ln.xs[adv.length] = x - ln.gap;
         }
     }
 
@@ -156,13 +212,43 @@ final class ChapterLayout {
     int offsetAt(int lineIdx, float x) {
         Line l = lines.get(lineIdx);
         if (l.paraStart < 0) return -1;
-        int o = l.paraStart + Math.max(0, l.layout.getOffsetForHorizontal(l.line, x) - l.indentLen);
+        int at;
+        if (l.xs != null) {
+            // as the layout answers: the character boundary nearest to x
+            int k = 0;
+            while (k < l.xs.length - 1 && x >= (l.xs[k] + l.xs[k + 1]) / 2) k++;
+            at = l.layout.getLineStart(l.line) + k;
+        } else at = l.layout.getOffsetForHorizontal(l.line, x);
+        int o = l.paraStart + Math.max(0, at - l.indentLen);
         return Math.max(l.offset, Math.min(o, Math.max(l.offset, l.end - 1)));
+    }
+
+    /**
+     * Chapter offset of the gap between two characters that is nearest to x on the line; unlike
+     * {@link #offsetAt} the gap behind the last character counts too (a selection can end there). -1 for the
+     * heading.
+     */
+    int boundaryAt(int lineIdx, float x) {
+        Line l = lines.get(lineIdx);
+        if (l.paraStart < 0) return -1;
+        int at;
+        if (l.xs != null) {
+            int k = 0;
+            while (k < l.xs.length - 1 && x >= (l.xs[k] + l.xs[k + 1]) / 2) k++;
+            at = l.layout.getLineStart(l.line) + k;
+        } else at = l.layout.getOffsetForHorizontal(l.line, x);
+        int o = l.paraStart + Math.max(0, at - l.indentLen);
+        return Math.max(l.offset, Math.min(o, Math.max(l.offset, l.end)));
     }
 
     /** x of the chapter offset on the line; an offset at or past the line's end gives its right edge. */
     float xOf(int lineIdx, int offset) {
         Line l = lines.get(lineIdx);
+        if (l.xs != null) {
+            int k = offset >= l.end ? l.xs.length - 1
+                    : Math.max(l.offset, offset) - l.paraStart + l.indentLen - l.layout.getLineStart(l.line);
+            return l.xs[Math.max(0, Math.min(k, l.xs.length - 1))];
+        }
         if (offset >= l.end) return l.layout.getLineRight(l.line);
         return l.layout.getPrimaryHorizontal(Math.max(l.offset, offset) - l.paraStart + l.indentLen);
     }
@@ -172,8 +258,13 @@ final class ChapterLayout {
         int i = from;
         while (i < to) {
             Line a = lines.get(i);
+            if (a.xs != null) {
+                drawStretched(c, a);
+                i++;
+                continue;
+            }
             int j = i;
-            while (j + 1 < to && lines.get(j + 1).layout == a.layout) j++;
+            while (j + 1 < to && lines.get(j + 1).layout == a.layout && lines.get(j + 1).xs == null) j++;
             Line b = lines.get(j);
             c.save();
             c.translate(0, a.layoutTop);
@@ -182,6 +273,20 @@ final class ChapterLayout {
             c.restore();
             i = j + 1;
         }
+    }
+
+    /**
+     * One call with wider letter spacing. The engine puts half of the spacing in front of each character, so
+     * the start moves back by half of what was added to keep the first character where the layout has it.
+     */
+    private static void drawStretched(Canvas c, Line l) {
+        TextPaint p = l.layout.getPaint();
+        float spacing = p.getLetterSpacing();
+        int start = l.layout.getLineStart(l.line);
+        p.setLetterSpacing(spacing + l.gap / p.getTextSize());
+        c.drawText(l.layout.getText(), l.stretchFrom, start + l.xs.length - 1,
+                l.xs[l.stretchFrom - start] - l.gap / 2, l.layoutTop + l.layout.getLineBaseline(l.line), p);
+        p.setLetterSpacing(spacing);
     }
 
     /** Paints the background of the chapter text [a, b) on lines [from, to). */

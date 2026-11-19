@@ -6,6 +6,13 @@
             android:key="resume_reading"
             android:summary="@string/pref_resume_sum"
             android:title="@string/pref_resume" />
+        <ListPreference
+            android:defaultValue="ask"
+            android:entries="@array/leave_unshelved_names"
+            android:entryValues="@array/leave_unshelved_values"
+            android:key="leave_unshelved"
+            android:summary="%s"
+            android:title="@string/pref_leave_unshelved" />
     </PreferenceCategory>
     <PreferenceCategory android:title="@string/pref_cat_browser">
         <ListPreference
@@ -161,6 +168,11 @@
             android:key="check_at_end"
             android:summary="@string/pref_check_end_sum"
             android:title="@string/pref_check_end" />
+        <SwitchPreference
+            android:defaultValue="true"
+            android:key="auto_retry"
+            android:summary="@string/pref_auto_retry_sum"
+            android:title="@string/pref_auto_retry" />
         <SwitchPreference
             android:defaultValue="false"
             android:key="preload_chapters"

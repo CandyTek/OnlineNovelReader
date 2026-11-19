@@ -205,6 +205,8 @@ final class ReaderSheets {
         acts.add(this::controls);
         labels.add(a.getString(R.string.rt_group_text));
         acts.add(this::textOptions);
+        labels.add(a.getString(R.string.rd_net_test));
+        acts.add(this::netTest);
         labels.add(a.getString(R.string.settings));
         acts.add(() -> a.startActivity(new android.content.Intent(a, com.rc.novelreader.settings.SettingsActivity.class)));
         menu(R.string.more, labels, acts);
@@ -353,27 +355,60 @@ final class ReaderSheets {
 
     // ------------------------------------------------------------------ search in the book
 
+    // The search outlives its window. Going to a hit folds the window into a small bar in the top right corner
+    // of the page (previous hit, "3/57", next hit, end); the bar's middle opens the window again as it was left,
+    // so a list of hits can be walked through without searching anew each time.
+    private String sWord = "";
+    private final List<int[]> sHits = new ArrayList<>();
+    private final List<String> sLabels = new ArrayList<>();
+    /** The hit gone to last, the first row the list showed, and the number of the search running. */
+    private int sAt = -1, sTop, sRun;
+    private AlertDialog sDialog;
+    private LinearLayout sPill;
+    private TextView sPillText;
+
     void search() {
+        search(null);
+    }
+
+    /** @param preset text to look for at once (a selection); null opens the search as it was left */
+    void search(final String preset) {
+        if (sDialog != null && sDialog.isShowing()) return;
+        showPill(false);
         LinearLayout col = column();
         final EditText q = new EditText(a);
         q.setHint(R.string.rd_search_hint);
         q.setSingleLine(true);
         q.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
+        q.setText(preset != null ? preset.replace('\n', ' ').trim() : sWord);
+        q.setSelection(q.length());
         col.addView(q);
         final TextView info = note(col, R.string.rd_search_note);
+        final boolean resumed = preset == null && !sHits.isEmpty();
+        if (resumed) info.setText(a.getString(R.string.rd_search_found, sHits.size()));
         final ListView list = new ListView(a);
         col.addView(list, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, App.dp(320)));
-        final List<int[]> hits = new ArrayList<>();
-        final List<String> labels = new ArrayList<>();
-        final ArrayAdapter<String> adapter = new ArrayAdapter<>(a, android.R.layout.simple_list_item_1, labels);
+        final ArrayAdapter<String> adapter = new ArrayAdapter<String>(a, android.R.layout.simple_list_item_1, sLabels) {
+            @Override
+            public View getView(int position, View convertView, ViewGroup parent) {
+                View v = super.getView(position, convertView, parent);
+                // where the reader is now
+                v.setBackgroundColor(position == sAt ? 0x333B8BEB : 0);
+                return v;
+            }
+        };
         list.setAdapter(adapter);
-        final AlertDialog d = dlg(R.string.rd_search).setView(col).setNegativeButton(R.string.cancel, null).create();
-        final int[] run = {0};
-        App.numpadEnter(q);
-        q.setOnEditorActionListener((v, action, ev) -> {
+        final boolean[] ended = {false};
+        final AlertDialog d = dlg(R.string.rd_search).setView(col)
+                .setNegativeButton(R.string.rd_search_end, (x, w) -> {
+                    ended[0] = true;
+                    endSearch();
+                })
+                .setPositiveButton(R.string.rd_search_fold, null).create();
+        final Runnable run = () -> {
             final String word = q.getText().toString().trim();
-            if (word.isEmpty()) return true;
-            final int mine = ++run[0];
+            if (word.isEmpty()) return;
+            final int mine = ++sRun;
             final List<Chapter> all = new ArrayList<>(a.chapters);
             info.setText(R.string.loading);
             App.IO.execute(() -> {
@@ -388,30 +423,109 @@ final class ReaderSheets {
                     for (int at = low.indexOf(needle); at >= 0 && found.size() < 300; at = low.indexOf(needle, at + needle.length())) {
                         found.add(new int[]{c.idx, at, needle.length()});
                         int from = Math.max(0, at - 14), to = Math.min(text.length(), at + needle.length() + 26);
-                        names.add(c.displayTitle() + "\n…" + text.substring(from, to).replace('\n', ' ') + "…");
+                        names.add(c.displayTitle() + "\n\u2026" + text.substring(from, to).replace('\n', ' ') + "\u2026");
                     }
                 }
                 App.MAIN.post(() -> {
-                    if (mine != run[0] || !d.isShowing()) return;
-                    hits.clear();
-                    hits.addAll(found);
-                    labels.clear();
-                    labels.addAll(names);
+                    if (mine != sRun || sDialog != d) return;
+                    sWord = word;
+                    sAt = -1;
+                    sHits.clear();
+                    sHits.addAll(found);
+                    sLabels.clear();
+                    sLabels.addAll(names);
                     adapter.notifyDataSetChanged();
                     info.setText(a.getString(R.string.rd_search_found, found.size()));
                 });
             });
+        };
+        App.numpadEnter(q);
+        q.setOnEditorActionListener((v, action, ev) -> {
+            run.run();
             return true;
         });
         list.setOnItemClickListener((p, v, pos, id) -> {
-            int[] h = hits.get(pos);
+            sTop = list.getFirstVisiblePosition();
             d.dismiss();
-            a.jump(h[0], h[1]);
-            a.flash(h[0], h[1], h[1] + h[2]);
+            goHit(pos);
         });
-        d.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+        d.setOnDismissListener(x -> {
+            if (sDialog == d) sDialog = null;
+            if (ended[0]) return;
+            sTop = list.getFirstVisiblePosition();
+            // folded, not closed: the hits stay a tap away
+            showPill(!sHits.isEmpty());
+        });
+        // a search that comes back with its hits is for picking, not for typing
+        if (!resumed && preset == null) d.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+        else d.getWindow().setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN);
+        sDialog = d;
         d.show();
-        q.requestFocus();
+        if (resumed) list.setSelection(Math.max(sTop, sAt < 0 ? 0 : Math.min(sAt, Math.max(sTop, sAt - 3))));
+        else if (preset != null) run.run();
+        else q.requestFocus();
+    }
+
+    private void goHit(int pos) {
+        if (pos < 0 || pos >= sHits.size()) return;
+        sAt = pos;
+        int[] h = sHits.get(pos);
+        a.jump(h[0], h[1]);
+        a.flash(h[0], h[1], h[1] + h[2]);
+        showPill(true);
+    }
+
+    private void endSearch() {
+        sRun++;
+        sHits.clear();
+        sLabels.clear();
+        sAt = -1;
+        sTop = 0;
+        showPill(false);
+    }
+
+    private TextView pillButton(String text, View.OnClickListener l) {
+        TextView t = new TextView(a);
+        t.setText(text);
+        t.setTextSize(17);
+        t.setTextColor(0xFFFFFFFF);
+        t.setGravity(Gravity.CENTER);
+        t.setMinWidth(App.dp(38));
+        t.setOnClickListener(l);
+        sPill.addView(t, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, App.dp(38)));
+        return t;
+    }
+
+    /** The folded search: [previous] [3/57, opens the window] [next] [end], floating over the page's corner. */
+    private void showPill(boolean on) {
+        if (!on) {
+            if (sPill != null) sPill.setVisibility(View.GONE);
+            return;
+        }
+        if (sPill == null) {
+            sPill = new LinearLayout(a);
+            sPill.setGravity(Gravity.CENTER_VERTICAL);
+            sPill.setBackgroundResource(R.drawable.tip_bg);
+            sPill.setPadding(App.dp(2), 0, App.dp(2), 0);
+            sPill.setElevation(App.dp(4));
+            pillButton("\u2039", v -> goHit(sAt <= 0 ? 0 : sAt - 1));
+            sPillText = pillButton("", v -> search(null));
+            sPillText.setTextSize(13.5f);
+            sPillText.setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_search, 0, 0, 0);
+            sPillText.setCompoundDrawableTintList(android.content.res.ColorStateList.valueOf(0xFFFFFFFF));
+            sPillText.setCompoundDrawablePadding(App.dp(4));
+            sPillText.setPadding(App.dp(4), 0, App.dp(6), 0);
+            sPillText.setContentDescription(a.getString(R.string.rd_search));
+            pillButton("\u203A", v -> goHit(sAt + 1));
+            pillButton("\u00D7", v -> endSearch()).setContentDescription(a.getString(R.string.rd_search_end));
+            android.widget.FrameLayout.LayoutParams lp = new android.widget.FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP | Gravity.END);
+            lp.setMargins(0, App.dp(40), App.dp(10), 0);
+            // over the page and its tint, under the menus
+            a.addOverPage(sPill, lp);
+        }
+        sPillText.setText(sAt >= 0 ? (sAt + 1) + "/" + sHits.size() : String.valueOf(sHits.size()));
+        sPill.setVisibility(View.VISIBLE);
     }
 
     // ------------------------------------------------------------------ automatic page turning
@@ -844,6 +958,10 @@ final class ReaderSheets {
             ReaderPrefs.indent = v == 1;
             ch.run();
         });
+        toggle(col, R.string.rd_justify, ReaderPrefs.justify, v -> {
+            ReaderPrefs.justify = v == 1;
+            ch.run();
+        });
         toggle(col, R.string.rd_bold, ReaderPrefs.bold, v -> {
             ReaderPrefs.bold = v == 1;
             ch.run();
@@ -959,69 +1077,85 @@ final class ReaderSheets {
     }
 
     void replacements() {
-        final List<TextRules.Rule> rules = TextRules.all();
-        String[] labels = new String[rules.size()];
-        for (int i = 0; i < labels.length; i++) {
-            TextRules.Rule r = rules.get(i);
-            labels[i] = shortened(r.find) + "  →  " + (r.to.isEmpty() ? a.getString(R.string.rd_removed) : shortened(r.to))
-                    + "\n" + a.getString(r.book == 0 ? R.string.rd_all_books : r.book == a.bookId ? R.string.rd_this_book : R.string.rd_other_book);
-        }
-        AlertDialog.Builder b = dlg(R.string.rd_replacements).setNegativeButton(R.string.cancel, null)
-                .setPositiveButton(R.string.add, (d, w) -> editRule(null, ""));
-        if (labels.length == 0) b.setMessage(R.string.rd_replacements_empty);
-        else b.setItems(labels, (d, w) -> editRule(rules.get(w), ""));
-        b.show();
+        // a screen of its own: the list can be long
+        ReplaceActivity.open(a, a.bookId);
     }
 
     /** @param preset the text to find when a new rule is made from a selection */
     void editRule(final TextRules.Rule existing, String preset) {
+        ReplaceActivity.edit(a, a.bookId, existing, preset, () -> {
+            ReplaceActivity.changed = false;
+            a.reprocess();
+        });
+    }
+
+    // ------------------------------------------------------------------ connection test
+
+    /** Well-known addresses that tell "the network is down" from "the site is down" (and whether a proxy is on). */
+    private static final String[][] NET_TARGETS = {{"Bing", "https://www.bing.com/"}, {"Google", "https://www.google.com/"}};
+
+    /**
+     * One request to each of two search engines, made when the reader asks for it and again on "Test again".
+     * Nothing goes to the site of the book.
+     */
+    void netTest() {
         LinearLayout col = column();
-        final EditText find = new EditText(a), to = new EditText(a);
-        find.setHint(R.string.rd_find);
-        find.setMaxLines(5);
-        find.setText(existing == null ? preset : existing.find);
-        to.setHint(R.string.rd_replace_with);
-        to.setMaxLines(5);
-        to.setText(existing == null ? "" : existing.to);
-        final CheckBox regex = new CheckBox(a), only = new CheckBox(a);
-        regex.setText(R.string.rd_regex);
-        regex.setChecked(existing != null && existing.regex);
-        only.setText(R.string.rd_this_book_only);
-        only.setChecked(existing == null || existing.book != 0);
-        col.addView(find);
-        col.addView(to);
-        col.addView(regex);
-        col.addView(only);
-        note(col, R.string.rd_replace_note);
-        AlertDialog.Builder b = dlg(existing == null ? R.string.rd_replace : R.string.rd_edit_rule).setView(scroll(col))
-                .setNegativeButton(R.string.cancel, null)
-                .setPositiveButton(R.string.save, (d, w) -> {
-                    String f = find.getText().toString();
-                    if (f.trim().isEmpty()) return;
-                    if (regex.isChecked()) {
-                        try {
-                            java.util.regex.Pattern.compile(f);
-                        } catch (Exception e) {
-                            App.toast(a.getString(R.string.rd_regex_bad));
-                            return;
-                        }
-                    }
-                    TextRules.Rule r = existing == null ? new TextRules.Rule() : existing;
-                    r.find = f;
-                    r.to = to.getText().toString();
-                    r.regex = regex.isChecked();
-                    r.book = only.isChecked() ? (existing != null && existing.book != 0 ? existing.book : a.bookId) : 0;
-                    if (existing == null) TextRules.all().add(r);
-                    TextRules.save();
-                    a.reprocess();
-                });
-        if (existing != null) {
-            b.setNeutralButton(R.string.rd_delete, (d, w) -> {
-                TextRules.all().remove(existing);
-                TextRules.save();
-                a.reprocess();
-            });
+        final TextView[] out = new TextView[NET_TARGETS.length];
+        for (int i = 0; i < NET_TARGETS.length; i++) {
+            LinearLayout row = new LinearLayout(a);
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            TextView name = new TextView(a);
+            name.setText(NET_TARGETS[i][0]);
+            name.setTextSize(15);
+            name.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            row.addView(name, new LinearLayout.LayoutParams(App.dp(84), ViewGroup.LayoutParams.WRAP_CONTENT));
+            out[i] = new TextView(a);
+            out[i].setTextSize(14);
+            row.addView(out[i], new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+            col.addView(row, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            row.setMinimumHeight(App.dp(48));
         }
-        b.show();
+        note(col, R.string.rd_net_note);
+        final AlertDialog d = dlg(R.string.rd_net_test).setView(col).setPositiveButton(R.string.ok, null)
+                .setNeutralButton(R.string.rd_net_again, null).create();
+        final int[] round = {0};
+        final Runnable run = () -> {
+            final int mine = ++round[0];
+            for (int i = 0; i < NET_TARGETS.length; i++) {
+                final int k = i;
+                out[k].setTextColor(0xFF8C9792);
+                out[k].setText(R.string.rd_net_testing);
+                App.IO.execute(() -> {
+                    final long t0 = android.os.SystemClock.elapsedRealtime();
+                    int code = 0;
+                    String error = null;
+                    java.net.HttpURLConnection c = null;
+                    try {
+                        c = (java.net.HttpURLConnection) new java.net.URL(NET_TARGETS[k][1]).openConnection();
+                        c.setConnectTimeout(8000);
+                        c.setReadTimeout(8000);
+                        c.setRequestProperty("User-Agent", App.UA);
+                        code = c.getResponseCode();
+                    } catch (Throwable t) {
+                        error = a.explain(t)[0];
+                    } finally {
+                        if (c != null) c.disconnect();
+                    }
+                    final long ms = android.os.SystemClock.elapsedRealtime() - t0;
+                    final int status = code;
+                    final String err = error;
+                    App.MAIN.post(() -> {
+                        // an answer to an earlier round, or to a window that is gone
+                        if (mine != round[0] || !d.isShowing()) return;
+                        out[k].setTextColor(err == null ? 0xFF2E9E5B : 0xFFD9534F);
+                        out[k].setText(err == null ? a.getString(R.string.rd_net_ok, ms, status) : a.getString(R.string.rd_net_fail, ms / 1000f, err));
+                    });
+                });
+            }
+        };
+        d.show();
+        // the button must not close the window
+        d.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> run.run());
+        run.run();
     }
 }

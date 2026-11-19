@@ -110,7 +110,8 @@ public final class Library {
             App.IO.execute(() -> {
                 try {
                     Book fresh = Db.book(id);
-                    if (fresh != null) refreshToc(fresh);
+                    // the page in the browser is the first page of the list: only what it lacks is asked for
+                    if (fresh != null) refreshToc(fresh, r);
                 } catch (IOException ignored) {
                 }
             });
@@ -123,7 +124,10 @@ public final class Library {
         ChapterContent cc = r.chapter;
         String chKey = Urls.normalize(r.url);
         Chapter known = Db.chapterByKey(chKey);
-        if (known != null) return new long[]{known.bookId, known.idx};
+        if (known != null) {
+            keepText(known, r);
+            return new long[]{known.bookId, known.idx};
+        }
 
         String tocUrl = cc.tocUrl;
         Book b = tocUrl == null ? null : Db.bookByKey(Urls.normalize(tocUrl));
@@ -135,7 +139,10 @@ public final class Library {
             }
             List<Chapter> chapters = Db.chapters(b.id);
             int idx = indexOf(chapters, chKey, cc.title);
-            if (idx >= 0) return new long[]{b.id, idx};
+            if (idx >= 0) {
+                if (chapters.get(idx).urlKey.equals(chKey)) keepText(chapters.get(idx), r);
+                return new long[]{b.id, idx};
+            }
             if (!chapters.isEmpty() && !b.linked) return new long[]{b.id, Math.min(b.curIdx, chapters.size() - 1)};
         }
         if (b == null) {
@@ -163,6 +170,9 @@ public final class Library {
             } catch (IOException ignored) {
             }
             if (cc.nextUrl != null) appendLinked(b.id, idx, cc.nextUrl);
+        } else if (!cc.errorPage) {
+            // the loader has to walk the chapter's pages: it starts from this one instead of fetching it again
+            PageFetcher.offer(r);
         }
         b.curIdx = idx;
         b.curOffset = 0;
@@ -180,6 +190,48 @@ public final class Library {
             });
         }
         return new long[]{b.id, idx};
+    }
+
+    /**
+     * The page open in the browser is this chapter, and the reader is about to show it: its text is stored, so
+     * the site is not asked for the same page a second time. A chapter split over pages is left to the loader,
+     * which is handed this first page.
+     * @return true when the text was stored
+     */
+    private static boolean keepText(Chapter c, PageResult r) {
+        ChapterContent cc = r.chapter;
+        if (c.cached || cc == null || cc.errorPage || cc.text == null || Texts.wlen(cc.text) < 2) return false;
+        if (cc.nextInChapter) {
+            PageFetcher.offer(r);
+            return false;
+        }
+        try {
+            write(file(c.bookId, c.id), cc.text);
+        } catch (IOException e) {
+            return false;
+        }
+        ContentValues v = new ContentValues();
+        v.put("cached", 1);
+        // a chapter known only from a "next" link has no name until its page is read
+        String t = ContentCleaner.stripPageMark(cc.title);
+        if (c.title.isEmpty() && !t.isEmpty()) v.put("title", t);
+        Db.get().update("chapters", v, "id=?", new String[]{String.valueOf(c.id)});
+        Book b = Db.book(c.bookId);
+        if (b != null && b.linked && cc.nextUrl != null) appendLinked(b.id, c.idx, cc.nextUrl);
+        if (v.containsKey("title")) Events.post(Events.BOOK, c.bookId);
+        return true;
+    }
+
+    /**
+     * A page the user has in front of them (the reader's verification window) turned out to be a chapter of a
+     * book: its text is kept, so that showing it costs the site nothing more.
+     */
+    public static boolean keepSniffed(PageResult r) {
+        if (r == null || r.chapter == null) return false;
+        Chapter known = Db.chapterByKey(Urls.normalize(r.url));
+        if (known == null || !keepText(known, r)) return false;
+        Events.post(Events.CACHE, known.bookId);
+        return true;
     }
 
     private static int indexOf(List<Chapter> chapters, String urlKey, String title) {
@@ -218,8 +270,54 @@ public final class Library {
      * and merges it into the database. @return number of chapters that are new.
      */
     public static int refreshToc(Book b) throws IOException {
+        return refreshToc(b, null);
+    }
+
+    /** @param have the contents page as the browser shows it right now, used instead of fetching it when it has a list */
+    private static int refreshToc(Book b, PageResult have) throws IOException {
         if (b.tocUrl.isEmpty()) return 0;
-        PageResult r = PageFetcher.fetch(b.tocUrl, b.detailUrl, false);
+        // Two parts of the app can want the same list at the same moment (a book just opened from its page is
+        // completed in the background while the reader, finding no chapters yet, asks too): the second waits
+        // for the first and takes its answer instead of reading every page of the list again.
+        synchronized (lock(TOC_LOCKS, b.id)) {
+            Object[] last = TOC_DONE.get(b.id);
+            if (last != null && System.currentTimeMillis() - (Long) last[0] < 5000) {
+                if (last[1] != null) throw new IOException(((IOException) last[1]).getMessage(), (IOException) last[1]);
+                Book now = Db.book(b.id);
+                if (now != null) {
+                    b.tocUrl = now.tocUrl;
+                    b.linked = now.linked;
+                }
+                return 0;
+            }
+            try {
+                int added = readToc(b, have);
+                TOC_DONE.put(b.id, new Object[]{System.currentTimeMillis(), null});
+                return added;
+            } catch (IOException e) {
+                TOC_DONE.put(b.id, new Object[]{System.currentTimeMillis(), e});
+                throw e;
+            }
+        }
+    }
+
+    private static final Object[] TOC_LOCKS = locks(16), TEXT_LOCKS = locks(64);
+    /** Book id to {when its list was last read, the IOException that ended it or null}. */
+    private static final Map<Long, Object[]> TOC_DONE = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private static Object[] locks(int n) {
+        Object[] o = new Object[n];
+        for (int i = 0; i < n; i++) o[i] = new Object();
+        return o;
+    }
+
+    private static Object lock(Object[] set, long id) {
+        return set[(int) ((id & 0x7fffffff) % set.length)];
+    }
+
+    private static int readToc(Book b, PageResult have) throws IOException {
+        boolean reuse = have != null && !have.toc.isEmpty() && Urls.normalize(have.url).equals(Urls.normalize(b.tocUrl));
+        PageResult r = reuse ? have : PageFetcher.fetch(b.tocUrl, b.detailUrl, false);
         PageResult.BookInfo info = r.book;
         String tocUrl = b.tocUrl;
         if (r.moreTocUrl != null && r.toc.size() < 40) {
@@ -389,9 +487,33 @@ public final class Library {
 
     /** Returns the chapter text, downloading and caching it when needed (merging paginated chapters). */
     public static String loadChapter(Book b, Chapter c, boolean force) throws IOException {
-        File f = file(b.id, c.id);
+        return loadChapter(b, c, force, null);
+    }
+
+    /** Receives the text of a chapter before {@link #loadChapter} returns. */
+    public interface Soon {
+        /** Called once at most, on the loading thread. */
+        void onText(String text);
+    }
+
+    /**
+     * @param soon the last chapter of a book without a chapter list is also asked where the book goes on, which
+     *             can take much longer than the text: soon gets the text (already stored) when that search begins.
+     */
+    public static String loadChapter(final Book b, final Chapter c, boolean force, final Soon soon) throws IOException {
+        final File f = file(b.id, c.id);
         if ((!force || b.local()) && f.exists()) return read(f);
         if (b.local()) throw new IOException("The text of this imported book is missing");
+        // The reader and a caching job can reach the same chapter together: one of them fetches, the other
+        // waits and reads what was stored.
+        synchronized (lock(TEXT_LOCKS, c.id)) {
+            if (!force && f.exists()) return read(f);
+            if (force) PageFetcher.forget(c.url);
+            return fetchChapter(b, c, force, soon, f);
+        }
+    }
+
+    private static String fetchChapter(final Book b, final Chapter c, boolean force, final Soon soon, final File f) throws IOException {
 
         StringBuilder text = new StringBuilder();
         String title = null, url = c.url, referer = Texts.or(b.tocUrl, b.detailUrl), nextChapter = null;
@@ -399,8 +521,29 @@ public final class Library {
         seen.add(Urls.normalize(url));
         // a book without a chapter list learns of the next chapter only from the last one's page
         boolean needNext = b.linked && c.idx == Db.count("SELECT COUNT(*) FROM chapters WHERE bookId=?", String.valueOf(b.id)) - 1;
+        final boolean[] told = {false};
+        PageFetcher.Early early = soon == null || !needNext ? null : r -> {
+            ChapterContent e = r.chapter;
+            if (told[0] || e == null || e.errorPage || e.nextInChapter || Texts.wlen(e.text) < 2) return;
+            try {
+                write(f, e.text);
+            } catch (IOException x) {
+                return;
+            }
+            told[0] = true;
+            ContentValues v = new ContentValues();
+            v.put("cached", 1);
+            String t = ContentCleaner.stripPageMark(e.title);
+            if (c.title.isEmpty() && !t.isEmpty()) {
+                v.put("title", t);
+                c.title = t;
+            }
+            Db.get().update("chapters", v, "id=?", new String[]{String.valueOf(c.id)});
+            c.cached = true;
+            soon.onText(e.text);
+        };
         for (int page = 0; page < 40; page++) {
-            PageResult r = PageFetcher.fetch(url, referer, true, needNext);
+            PageResult r = PageFetcher.fetch(url, referer, true, needNext, page == 0 ? early : null);
             ChapterContent cc = r.chapter;
             // The site's "not found" or "try again" page is not the chapter, and half a chapter is not one either:
             // nothing is stored, so the same address is simply asked again next time.

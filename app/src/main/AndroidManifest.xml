@@ -87,6 +87,12 @@
             android:theme="@style/ReaderTheme" />
 
         <activity
+            android:name=".reader.ReplaceActivity"
+            android:exported="false"
+            android:label="@string/rd_replacements"
+            android:theme="@style/SettingsTheme"
+            android:windowSoftInputMode="adjustResize" />
+        <activity
             android:name=".settings.SettingsActivity"
             android:exported="false"
             android:label="@string/settings"
@@ -102,6 +108,11 @@
             android:exported="false"
             android:label="@string/bookmarks"
             android:theme="@style/SettingsTheme" />
+        <activity
+            android:name=".browser.ScanActivity"
+            android:exported="false"
+            android:screenOrientation="locked"
+            android:theme="@style/ScanTheme" />
         <activity
             android:name=".settings.ScriptsActivity"
             android:exported="false"

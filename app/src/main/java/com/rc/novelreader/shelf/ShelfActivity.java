@@ -105,6 +105,13 @@ public class ShelfActivity extends Activity implements Events.Listener {
             }
         };
         grid.setAdapter(adapter);
+        // as many columns as the width holds, counted again whenever the width changes (rotation, split screen)
+        grid.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (r - l == or - ol) return;
+            final int n = columns(r - l - grid.getPaddingLeft() - grid.getPaddingRight(),
+                    getResources().getConfiguration().smallestScreenWidthDp);
+            if (n != grid.getNumColumns()) grid.post(() -> grid.setNumColumns(n));
+        });
         grid.setOnItemClickListener((p, v, pos, id) -> ReaderActivity.start(this, id, -1));
         grid.setOnItemLongClickListener((p, v, pos, id) -> {
             showBookMenu(books.get(pos));
@@ -131,6 +138,15 @@ public class ShelfActivity extends Activity implements Events.Listener {
         findViewById(R.id.btnMenu).setOnClickListener(this::showMenu);
         Events.add(this);
         if (savedInstanceState == null) openFile(getIntent());
+    }
+
+    /**
+     * Columns of the shelf for a width in pixels. A cover is about as wide as on a phone (three across) and a
+     * little wider on tablets, which are held further away; never fewer than three.
+     */
+    private static int columns(int width, int smallestDp) {
+        int cell = App.dp(smallestDp >= 840 ? 150 : smallestDp >= 600 ? 128 : 100), gap = App.dp(14);
+        return Math.max(3, (width + gap) / (cell + gap));
     }
 
     @Override

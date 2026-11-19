@@ -7,6 +7,7 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Typeface;
@@ -43,8 +44,14 @@ public class PageView extends View {
         /** Must answer asynchronously with {@link #setChapter} or {@link #setError}. */
         void requestChapter(int idx);
 
-        /** The chapter on screen changed, or started, finished or failed loading (see {@link #isError}, {@link #isLoading}). */
-        void onChapterState();
+        /** "Open in browser" under a chapter that failed was tapped. */
+        void onOpenWeb(int idx);
+
+        /** "Verify" under a chapter the site wants a human check for was tapped. */
+        void onVerify(int idx);
+
+        /** Whether a chapter that failed may be asked for again without a tap: somebody is still reading. */
+        boolean mayAutoRetry();
 
         /** Whether the chapter may be requested before the reader gets to it (it is cached, or preloading is on). */
         boolean mayPreload(int idx);
@@ -88,6 +95,13 @@ public class PageView extends View {
         ChapterLayout layout;
         /** Entered backwards: show the end of the chapter once it is loaded. */
         boolean fromEnd;
+        /** ERROR: when it failed, and where its two buttons were drawn last (empty when they were not). */
+        long failedAt;
+        /** ERROR: when it is asked for again by itself (uptime), 0 when it is not. */
+        long retryAt;
+        /** ERROR: the site wants a human check; the first button opens it instead of asking again. */
+        boolean verify;
+        final RectF retryBox = new RectF(), webBox = new RectF();
     }
 
     private Host host;
@@ -109,7 +123,29 @@ public class PageView extends View {
     private final TextPaint infoPaint = new TextPaint(Paint.ANTI_ALIAS_FLAG);
     private final Paint fill = new Paint();
     private final float density;
-    private String loadingText = "…", waitedText = "%d s";
+    private String loadingText = "…", waitedText = "%d s", retryText = "", webText, verifyText = "";
+    /** The button of a failed chapter under the finger: 1 retry, 2 open in browser. */
+    private Slot btnSlot;
+    private int btnWhich;
+    /** A failed chapter is asked for again this often for as long as somebody reads; 0 leaves it to the button. */
+    private long autoRetryMs;
+    private String retryInText = "%d";
+    private static final long AUTO_RETRY_MS = 60000;
+    private final Runnable retryDue = new Runnable() {
+        @Override
+        public void run() {
+            if (host == null || !isAttachedToWindow()) return;
+            long now = android.os.SystemClock.uptimeMillis();
+            boolean may = host.mayAutoRetry();
+            for (Slot s : new Slot[]{prev, cur, next}) {
+                if (s == null || s.state != ERROR || s.retryAt == 0 || s.retryAt > now) continue;
+                // nobody there (screen left, a break, no touch for long): the site is left alone, look again later
+                if (may) retry(s);
+                else s.retryAt = now + autoRetryMs;
+            }
+            scheduleRetry();
+        }
+    };
     private final Paint spinPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final RectF spinBox = new RectF();
     private boolean showPercent = true;
@@ -158,6 +194,15 @@ public class PageView extends View {
     /** 1 or 2 while the start or end handle is dragged. */
     private int dragHandle;
     private boolean longFired;
+    /** While a handle is dragged: the end that stays, and where the finger holds the handle relative to its line. */
+    private int fixed;
+    private float grabDx, grabDy;
+    /** The point of the text the drag is at now, for the scrolling at the edges. */
+    private float dragX, dragY;
+    private boolean edgeOn;
+    private final Path handlePath = new Path();
+    /** android.widget.Magnifier (Android 9+), created on first use; kept as Object for the versions without it. */
+    private Object magnifier;
     private final Paint selPaint = new Paint(), hlPaint = new Paint(), handlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     // the passage being read aloud
     private int hlIdx = -1, hlA, hlB;
@@ -185,6 +230,39 @@ public class PageView extends View {
     public void setLoadingText(String s, String waited) {
         loadingText = s;
         waitedText = waited;
+    }
+
+    /** The buttons drawn under a chapter that failed. @param web null when the book has no page to open */
+    public void setErrorLabels(String retry, String web, String verify) {
+        retryText = retry;
+        webText = web;
+        verifyText = verify;
+        invalidate();
+    }
+
+    /**
+     * Failed chapters the view holds are asked for again once a minute, one request each, until they load.
+     * @param in format with one %d (seconds), the line under the buttons
+     */
+    public void setAutoRetry(boolean on, String in) {
+        autoRetryMs = on ? AUTO_RETRY_MS : 0;
+        retryInText = in;
+        long now = android.os.SystemClock.uptimeMillis();
+        for (Slot s : new Slot[]{prev, cur, next}) {
+            if (s != null && s.state == ERROR) s.retryAt = on ? (s.retryAt > now ? s.retryAt : now + autoRetryMs) : 0;
+        }
+        scheduleRetry();
+        invalidate();
+    }
+
+    /** One timer for the failed chapter that is due first. */
+    private void scheduleRetry() {
+        removeCallbacks(retryDue);
+        long first = 0;
+        for (Slot s : new Slot[]{prev, cur, next}) {
+            if (s != null && s.state == ERROR && s.retryAt > 0 && (first == 0 || s.retryAt < first)) first = s.retryAt;
+        }
+        if (first > 0) postDelayed(retryDue, Math.max(0, first - android.os.SystemClock.uptimeMillis()));
     }
 
     /** Whole-book progress is only meaningful when the full chapter list is known. */
@@ -267,7 +345,6 @@ public class PageView extends View {
         scrollY = 0;
         pendingOffset = Math.max(0, offset);
         host.requestChapter(idx);
-        host.onChapterState();
         invalidate();
     }
 
@@ -280,6 +357,8 @@ public class PageView extends View {
         s.text = text == null ? "" : text;
         layout(s);
         if (dragDir != 0) curlDirty = true;
+        // turning back into a chapter that arrives during the turn: its last page is the one coming in
+        if (s == targetSlot && s != cur && dragDir < 0) targetPage = pages(s) - 1;
         if (s == cur) {
             if (pendingOffset < 0 && s.fromEnd) {
                 if (mode == SCROLL) scrollY = Math.max(0, columnHeight(s) - (oldH - scrollY));
@@ -289,18 +368,35 @@ public class PageView extends View {
             applyPendingOffset();
             ensureNeighbours();
             notifyPosition();
-            host.onChapterState();
         }
         invalidate();
     }
 
     public void setError(int idx, CharSequence message) {
+        setError(idx, message, true);
+    }
+
+    /** @param again a failure, to be asked for again by itself; false for an answer that is simply "nothing" */
+    public void setError(int idx, CharSequence message, boolean again) {
+        setError(idx, message, again, false);
+    }
+
+    /**
+     * @param verify the site asks for a human check: the first button reads "Verify" and goes to
+     *               {@link Host#onVerify}, and the chapter is not asked for again by itself (every such request
+     *               is one more the site holds against the reader)
+     */
+    public void setError(int idx, CharSequence message, boolean again, boolean verify) {
         Slot s = slot(idx);
         if (s == null) return;
+        again &= !verify;
+        s.verify = verify;
         s.state = ERROR;
         s.message = message == null ? "" : message;
+        s.failedAt = android.os.SystemClock.uptimeMillis();
+        s.retryAt = again && autoRetryMs > 0 ? s.failedAt + autoRetryMs : 0;
         s.layout = null;
-        if (s == cur) host.onChapterState();
+        scheduleRetry();
         invalidate();
     }
 
@@ -324,7 +420,6 @@ public class PageView extends View {
         s.message = "";
         s.since = android.os.SystemClock.uptimeMillis();
         s.layout = null;
-        if (s == cur) host.onChapterState();
         invalidate();
     }
 
@@ -402,6 +497,26 @@ public class PageView extends View {
 
     // ------------------------------------------------------------------ slots
 
+    /**
+     * A book that grows link by link has one page more than it has chapters: the place where the next chapter
+     * will be. Turning to it asks the host for chapter number chapterCount(), which is the host's cue to go and
+     * look; the wait, the failure and "nothing yet" are shown there like those of any chapter.
+     */
+    public void setTail(boolean on) {
+        tail = on;
+    }
+
+    private boolean tail;
+
+    private int count() {
+        return host.chapterCount() + (tail ? 1 : 0);
+    }
+
+    /** Whether the chapter is one of the (up to three) the view holds right now. */
+    public boolean holds(int idx) {
+        return slot(idx) != null;
+    }
+
     private Slot slot(int idx) {
         if (cur != null && cur.idx == idx) return cur;
         if (next != null && next.idx == idx) return next;
@@ -436,14 +551,21 @@ public class PageView extends View {
     }
 
     public void retry() {
-        if (cur != null && cur.state == ERROR) {
-            cur.state = LOADING;
-            cur.message = "";
-            cur.since = android.os.SystemClock.uptimeMillis();
-            host.requestChapter(cur.idx);
-            host.onChapterState();
-            invalidate();
-        }
+        retry(cur);
+    }
+
+    /** Asks again for the failed chapter idx when the view still holds it. */
+    public void retry(int idx) {
+        retry(slot(idx));
+    }
+
+    private void retry(Slot s) {
+        if (s == null || s.state != ERROR) return;
+        s.state = LOADING;
+        s.message = "";
+        s.since = android.os.SystemClock.uptimeMillis();
+        host.requestChapter(s.idx);
+        invalidate();
     }
 
     public boolean isLoading() {
@@ -483,7 +605,7 @@ public class PageView extends View {
     private void layout(Slot s) {
         if (contentW <= 0 || s.text == null) return;
         s.layout = ChapterLayout.build(s.title, s.text, paint, titlePaint, contentW, contentBottom - contentTop,
-                lineMult, paraMult, indent);
+                lineMult, paraMult, indent, ReaderPrefs.justify);
     }
 
     private void applyPendingOffset() {
@@ -569,20 +691,42 @@ public class PageView extends View {
                 c.restore();
             }
         } else {
-            drawMessage(c, s, contentTop + (contentBottom - contentTop) * 0.36f);
+            drawMessage(c, s, contentTop, contentTop + (contentBottom - contentTop) * 0.36f);
         }
         float frac = s.state == READY ? (pageIdx + 1f) / pages(s) : 0;
         drawChrome(c, s, s.state == READY ? (pageIdx + 1) + "/" + pages(s) : "", frac);
         c.restore();
     }
 
-    private void drawMessage(Canvas c, Slot s, float y) {
+    /**
+     * The page of a chapter that is not there yet, or failed: its heading where the text will have it, then the
+     * wait or the failure. What can be done about a failure is part of the page (two buttons under the message),
+     * so it turns and scrolls with it and is there for the next chapter as for the current one.
+     *
+     * @param top where the chapter's column starts; @param y where the message goes when the heading leaves room
+     */
+    private void drawMessage(Canvas c, Slot s, float top, float y) {
         CharSequence msg = s.message;
         // across the whole page, also where the text is set in two columns: the buttons under it are centred too
         int wide = Math.max(Math.max(contentW, 10), getWidth() - marginL - marginR);
+        s.retryBox.setEmpty();
+        s.webBox.setEmpty();
+        // a chapter entered backwards shows its end, where there is no heading
+        if (!s.fromEnd && s.title != null && !s.title.isEmpty()) {
+            StaticLayout h = ChapterLayout.heading(s.title, titlePaint, contentW);
+            float hy = top + paint.getTextSize() * 0.4f;
+            c.save();
+            c.translate(marginL, hy);
+            h.draw(c);
+            c.restore();
+            y = Math.max(y, hy + h.getHeight() + 46 * density);
+        }
         if (s.state != ERROR) {
-            // a turning ring: the page is alive even when the site takes its time
             long now = android.os.SystemClock.uptimeMillis();
+            postInvalidateDelayed(40);
+            // text that is on the device arrives sooner than a ring can be seen: no flicker for those
+            if (now - s.since < 250) return;
+            // a turning ring: the page is alive even when the site takes its time
             float r = 11 * density, cx = marginL + wide / 2f, cy = y - r - 10 * density;
             spinPaint.setStyle(Paint.Style.STROKE);
             spinPaint.setStrokeWidth(2.5f * density);
@@ -590,7 +734,6 @@ public class PageView extends View {
             spinPaint.setColor((fg & 0x00FFFFFF) | 0x90000000);
             spinBox.set(cx - r, cy - r, cx + r, cy + r);
             c.drawArc(spinBox, (now % 900) * 0.4f, 270, false, spinPaint);
-            postInvalidateDelayed(40);
             // first what everybody understands, then (smaller) the step it is at and how long it has taken
             StringBuilder small = new StringBuilder(msg);
             long waited = (now - s.since) / 1000;
@@ -603,6 +746,7 @@ public class PageView extends View {
             msg = sb;
         }
         TextPaint p = new TextPaint(paint);
+        p.setLetterSpacing(0);
         p.setTextSize(15 * density);
         p.setColor((fg & 0x00FFFFFF) | 0xB0000000);
         StaticLayout l = StaticLayout.Builder.obtain(msg, 0, msg.length(), p, wide)
@@ -611,6 +755,61 @@ public class PageView extends View {
         c.translate(marginL, y);
         l.draw(c);
         c.restore();
+        if (s.state != ERROR) return;
+        float bh = 42 * density, pad = 22 * density, gap = 14 * density;
+        String first = s.verify ? verifyText : retryText;
+        float w1 = p.measureText(first) + pad * 2, w2 = webText == null ? 0 : p.measureText(webText) + pad * 2;
+        float total = w1 + (w2 > 0 ? gap + w2 : 0);
+        float bx = marginL + (wide - total) / 2f, by = y + l.getHeight() + 20 * density;
+        s.retryBox.set(bx, by, bx + w1, by + bh);
+        drawButton(c, s.retryBox, first, p, s == btnSlot && btnWhich == 1);
+        if (w2 > 0) {
+            s.webBox.set(bx + w1 + gap, by, bx + total, by + bh);
+            drawButton(c, s.webBox, webText, p, s == btnSlot && btnWhich == 2);
+        }
+        if (s.retryAt > 0) {
+            // the reader need not do anything: say so, and when
+            long left = Math.max(0, (s.retryAt - android.os.SystemClock.uptimeMillis() + 999) / 1000);
+            String in = String.format(Locale.US, retryInText, left);
+            p.setTextSize(12.5f * density);
+            p.setColor((fg & 0x00FFFFFF) | 0x90000000);
+            c.drawText(in, marginL + (wide - p.measureText(in)) / 2f, by + bh + 26 * density, p);
+            postInvalidateDelayed(1000);
+        }
+    }
+
+    /** In the colours of the page, like everything else on it. */
+    private void drawButton(Canvas c, RectF box, String label, TextPaint p, boolean pressed) {
+        float r = box.height() / 2;
+        spinPaint.setStyle(Paint.Style.FILL);
+        spinPaint.setColor((fg & 0x00FFFFFF) | (pressed ? 0x40000000 : 0x16000000));
+        c.drawRoundRect(box, r, r, spinPaint);
+        spinPaint.setStyle(Paint.Style.STROKE);
+        spinPaint.setStrokeWidth(density);
+        spinPaint.setColor((fg & 0x00FFFFFF) | 0x70000000);
+        c.drawRoundRect(box, r, r, spinPaint);
+        p.setColor((fg & 0x00FFFFFF) | 0xE6000000);
+        c.drawText(label, box.centerX() - p.measureText(label) / 2, box.centerY() - (p.ascent() + p.descent()) / 2, p);
+    }
+
+    /** The button of a failed chapter at the point (0 when there is none); the chapter is left in btnSlot. */
+    private int buttonAt(float x, float y) {
+        if (mode == SCROLL && (y < contentTop || y > contentBottom)) return 0;
+        for (Slot s : new Slot[]{cur, mode == SCROLL ? next : null}) {
+            if (s == null || s.state != ERROR) continue;
+            int which = s.retryBox.contains(x, y) ? 1 : s.webBox.contains(x, y) ? 2 : 0;
+            if (which != 0) {
+                btnSlot = s;
+                return which;
+            }
+        }
+        return 0;
+    }
+
+    private void releaseButton() {
+        btnSlot = null;
+        btnWhich = 0;
+        invalidate();
     }
 
     /** A paper texture is a tile repeated over the page at the screen's density, a picture fills the page. */
@@ -665,16 +864,26 @@ public class PageView extends View {
         if (s == selSlot && selB > selA) s.layout.mark(c, from, to, selA, selB, selPaint);
     }
 
+    /**
+     * The two handles, as the system draws them: a drop hanging under the line, to the left of the start and to
+     * the right of the end, its corner on the exact spot. They lie outside the selected text, so the finger on
+     * one does not cover what is being selected.
+     */
     private void drawHandles(Canvas c) {
         if (selSlot == null || selSlot != cur) return;
-        float r = 9 * density;
+        float r = HANDLE_R * density;
         for (int i = 0; i < 2; i++) {
             float[] p = handlePos(i == 1);
             if (p == null) continue;
-            c.drawRect(p[0] - density, p[1] - paint.getTextSize(), p[0] + density, p[1], handlePaint);
-            c.drawCircle(p[0], p[1] + r, r, handlePaint);
+            float cx = i == 0 ? p[0] - r : p[0] + r, cy = p[1] + r;
+            handlePath.rewind();
+            handlePath.addCircle(cx, cy, r, Path.Direction.CW);
+            handlePath.addRect(Math.min(p[0], cx), p[1], Math.max(p[0], cx), cy, Path.Direction.CW);
+            c.drawPath(handlePath, handlePaint);
         }
     }
+
+    private static final float HANDLE_R = 10.5f;
 
     /** Header (chapter title) and footer (battery, clock, page, progress). */
     private void drawChrome(Canvas c, Slot s, String pageInfo, float chapterFraction) {
@@ -713,6 +922,9 @@ public class PageView extends View {
         c.save();
         c.clipRect(0, contentTop, w, contentBottom);
         float y = contentTop - scrollY;
+        // only what is drawn in this frame can be tapped
+        if (next != null) next.retryBox.setEmpty();
+        if (next != null) next.webBox.setEmpty();
         drawColumn(c, cur, y);
         float ny = y + columnHeight(cur) + chapterGap();
         if (next != null && ny < contentBottom) drawColumn(c, next, ny);
@@ -724,7 +936,7 @@ public class PageView extends View {
 
     private void drawColumn(Canvas c, Slot s, float y) {
         if (s.state != READY || s.layout == null) {
-            drawMessage(c, s, y + (contentBottom - contentTop) * 0.2f);
+            drawMessage(c, s, y, y + (contentBottom - contentTop) * 0.2f);
             return;
         }
         int from = s.layout.lineAt(contentTop - y);
@@ -747,7 +959,12 @@ public class PageView extends View {
             if (page + 1 < pages(cur)) {
                 targetSlot = cur;
                 targetPage = page + 1;
-            } else if (cur.idx + 1 < host.chapterCount()) {
+            } else if (cur.state == LOADING) {
+                // Still on its way: another tap (or the page timer) must not walk on through the book, asking
+                // the site for one chapter after the other and leaving the reader past what was never shown.
+                dragDir = 0;
+                return false;
+            } else if (cur.idx + 1 < host.chapterCount() || (cur.idx + 1 < count() && cur.state == READY)) {
                 if (next == null || next.idx != cur.idx + 1) next = request(cur.idx + 1, false);
                 targetSlot = next;
                 targetPage = 0;
@@ -796,7 +1013,9 @@ public class PageView extends View {
         dragDx = 0;
         ensureNeighbours();
         notifyPosition();
-        if (other) host.onChapterState();
+        // It failed while nobody was looking (fetched ahead): now that the reader turns to it, it is asked for
+        // again instead of showing a failure that may be long over.
+        if (other && cur.state == ERROR && android.os.SystemClock.uptimeMillis() - cur.failedAt > 5000) retry(cur);
     }
 
     private void animateTo(final boolean complete) {
@@ -876,7 +1095,8 @@ public class PageView extends View {
         for (int guard = 0; guard < 4; guard++) {
             float curH = columnHeight(cur), gap = chapterGap();
             if (scrollY < 0) {
-                if (cur.idx > 0 && cur.state != LOADING) {
+                // back out of a chapter that is still loading only into text that is there: no chain of requests
+                if (cur.idx > 0 && (cur.state != LOADING || (prev != null && prev.idx == cur.idx - 1 && prev.state == READY))) {
                     if (prev == null || prev.idx != cur.idx - 1) prev = request(cur.idx - 1, true);
                     next = cur;
                     cur = prev;
@@ -897,24 +1117,25 @@ public class PageView extends View {
                 changed = true;
                 continue;
             } else if (next == null) {
-                boolean more = cur.idx + 1 < host.chapterCount();
-                // without preloading, the next chapter is requested only once the end of this one is on screen
-                if (more && cur.state == READY && (scrollY + viewH >= curH || host.mayPreload(cur.idx + 1))) {
+                boolean more = cur.idx + 1 < count();
+                float max = Math.max(0, curH - viewH);
+                // without preloading, the next chapter is requested only once the end of this one is on screen;
+                // the place after the last chapter (a search on the site) only when the reader pulls on past the end
+                boolean wanted = cur.idx + 1 < host.chapterCount() ? scrollY + viewH >= curH || host.mayPreload(cur.idx + 1)
+                        : forward && scrollY > max;
+                if (more && cur.state == READY && wanted) {
                     next = request(cur.idx + 1, false);
                 } else {
-                    float max = Math.max(0, curH - viewH);
                     if (scrollY > max) {
                         scrollY = max;
-                        if (!more && forward) edge(true);
+                        // a chapter on its way may still bring its successor (books without a chapter list)
+                        if (!more && forward && cur.state != LOADING) edge(true);
                     }
                 }
             }
             break;
         }
-        if (changed) {
-            ensureNeighbours();
-            host.onChapterState();
-        }
+        if (changed) ensureNeighbours();
         notifyPosition();
     }
 
@@ -956,16 +1177,39 @@ public class PageView extends View {
                 downY = lastY = y;
                 moved = blocked = longFired = vert = brightDrag = rulerDrag = false;
                 dragHandle = selSlot == null ? 0 : handleAt(x, y);
-                if (dragHandle == 0) postDelayed(longPress, ViewConfiguration.getLongPressTimeout());
+                if (dragHandle != 0) grabHandle(x, y);
+                btnSlot = null;
+                btnWhich = selSlot == null ? buttonAt(x, y) : 0;
+                if (btnWhich != 0) invalidate();
+                else if (dragHandle == 0) postDelayed(longPress, ViewConfiguration.getLongPressTimeout());
                 return true;
             case MotionEvent.ACTION_MOVE: {
                 float dx = x - downX, dy = y - downY;
-                if (Math.abs(dx) > slop || Math.abs(dy) > slop) removeCallbacks(longPress);
+                if (Math.abs(dx) > slop || Math.abs(dy) > slop) {
+                    removeCallbacks(longPress);
+                    // a drag that starts on a button is a drag
+                    if (btnWhich != 0) releaseButton();
+                }
                 if (dragHandle != 0 || longFired) {
                     extendSelection(x, y);
+                    watchEdge();
                     return true;
                 }
-                if (selSlot != null) return true;
+                if (selSlot != null) {
+                    // the text can still be scrolled under a selection; a paged page stays where it is
+                    if (mode == SCROLL) {
+                        if (!moved && Math.abs(dy) > slop) {
+                            moved = true;
+                            lastY = y;
+                            host.onSelection(false);
+                        }
+                        if (moved) {
+                            scrollBy(lastY - y);
+                            lastY = y;
+                        }
+                    }
+                    return true;
+                }
                 if (brightDrag) {
                     host.onBrightnessDrag((lastY - y) / Math.max(1, getHeight()));
                     lastY = y;
@@ -1024,9 +1268,21 @@ public class PageView extends View {
                 velocity.recycle();
                 velocity = null;
                 removeCallbacks(longPress);
+                if (btnWhich != 0) {
+                    Slot s = btnSlot;
+                    int which = btnWhich;
+                    releaseButton();
+                    if (s == slot(s.idx) && s.state == ERROR) {
+                        if (which == 2) host.onOpenWeb(s.idx);
+                        else if (s.verify) host.onVerify(s.idx);
+                        else retry(s);
+                    }
+                    return true;
+                }
                 if (dragHandle != 0 || longFired) {
                     dragHandle = 0;
                     longFired = false;
+                    endDrag();
                     if (selSlot != null) host.onSelection(true);
                     return true;
                 }
@@ -1035,7 +1291,9 @@ public class PageView extends View {
                     return true;
                 }
                 if (selSlot != null) {
-                    clearSelection();
+                    // a tap beside the selection ends it; after scrolling, its menu comes back
+                    if (moved && selSlot == cur) host.onSelection(true);
+                    else clearSelection();
                     return true;
                 }
                 if (vert) {
@@ -1071,8 +1329,10 @@ public class PageView extends View {
             case MotionEvent.ACTION_CANCEL:
                 touching = false;
                 removeCallbacks(longPress);
+                releaseButton();
                 dragHandle = 0;
                 longFired = vert = brightDrag = rulerDrag = false;
+                endDrag();
                 if (velocity != null) {
                     velocity.recycle();
                     velocity = null;
@@ -1119,7 +1379,6 @@ public class PageView extends View {
 
     private void act(int action) {
         if (cur == null) return;
-        // a failed chapter has its own retry button; the menu must stay reachable there (contents, browser, leaving)
         if (action == ReaderPrefs.Z_MENU) host.onCenterTap();
         else if (action == ReaderPrefs.Z_PREV) turn(false);
         else if (action == ReaderPrefs.Z_NEXT) turn(true);
@@ -1492,8 +1751,15 @@ public class PageView extends View {
         return locate(x, y, false);
     }
 
-    /** @param exact only a point on a line of text counts; otherwise the nearest line and character are taken */
     private int locate(float x, float y, boolean exact) {
+        return locate(x, y, exact, false);
+    }
+
+    /**
+     * @param exact    only a point on a line of text counts; otherwise the nearest line and character are taken
+     * @param boundary the gap between characters nearest to the point (a handle), not the character under it
+     */
+    private int locate(float x, float y, boolean exact, boolean boundary) {
         if (!ready()) return -1;
         int k = 0;
         int[] lines;
@@ -1509,7 +1775,7 @@ public class PageView extends View {
             ChapterLayout.Line l = cur.layout.lines.get(i);
             if (ly < l.top || ly > l.bottom || lx < 0 || lx > l.layout.getLineRight(l.line) + paint.getTextSize()) return -1;
         }
-        return cur.layout.offsetAt(i, lx);
+        return boundary ? cur.layout.boundaryAt(i, lx) : cur.layout.offsetAt(i, lx);
     }
 
     /** Screen position of the start or end handle: {x, baseline y}; null when that end is off screen. */
@@ -1526,12 +1792,12 @@ public class PageView extends View {
     }
 
     private int handleAt(float x, float y) {
-        float reach = 30 * density, best = reach * reach;
+        float reach = 30 * density, best = reach * reach, r = HANDLE_R * density;
         int found = 0;
         for (int i = 0; i < 2; i++) {
             float[] p = handlePos(i == 1);
             if (p == null) continue;
-            float dx = x - p[0], dy = y - (p[1] + 9 * density), d = dx * dx + dy * dy;
+            float dx = x - (i == 0 ? p[0] - r : p[0] + r), dy = y - (p[1] + r), d = dx * dx + dy * dy;
             if (d < best) {
                 best = d;
                 found = i + 1;
@@ -1554,44 +1820,184 @@ public class PageView extends View {
             host.onSelectionLongPress();
             return;
         }
-        String t = cur.text;
-        int a = Math.min(o, t.length()), b = a;
-        while (a > 0 && t.charAt(a - 1) != '\n' && !sentenceEnd(t.charAt(a - 1))) a--;
-        while (b < t.length() && t.charAt(b) != '\n' && !sentenceEnd(t.charAt(b))) b++;
-        // take the closing punctuation and quotes along
-        while (b < t.length() && t.charAt(b) != '\n' && (sentenceEnd(t.charAt(b)) || "\u201D\u2019\u300D\u300F\uFF09)\"".indexOf(t.charAt(b)) >= 0)) b++;
-        if (b <= a) return;
+        int[] w = wordAt(cur.text, o);
+        if (w == null) return;
         selSlot = cur;
-        selA = anchorA = a;
-        selB = anchorB = b;
+        selA = anchorA = w[0];
+        selB = anchorB = w[1];
         longFired = true;
+        dragX = downX;
+        dragY = downY;
         performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
         invalidate();
     }
 
+    /**
+     * The word at an offset: {start, end}, as the system picks one on a long press (for Chinese that is a word
+     * of the system's dictionary, usually two or three characters). The handles and the "expand" button of the
+     * menu take it from there to a sentence or a paragraph.
+     */
+    private static int[] wordAt(String t, int o) {
+        if (t == null || t.isEmpty()) return null;
+        o = Math.max(0, Math.min(o, t.length() - 1));
+        if (t.charAt(o) == '\n') return null;
+        int ps = o, pe = o;
+        while (ps > 0 && t.charAt(ps - 1) != '\n') ps--;
+        while (pe < t.length() && t.charAt(pe) != '\n') pe++;
+        int a = o, b = o + 1;
+        try {
+            java.text.BreakIterator it = java.text.BreakIterator.getWordInstance();
+            it.setText(t.substring(ps, pe));
+            int end = it.following(o - ps);
+            int start = end == java.text.BreakIterator.DONE ? java.text.BreakIterator.DONE : it.previous();
+            if (start != java.text.BreakIterator.DONE && end - start <= 24) {
+                a = ps + start;
+                b = ps + end;
+            }
+        } catch (RuntimeException ignored) {
+        }
+        return b > a ? new int[]{a, b} : null;
+    }
+
+    /** The finger came down on a handle: from here the other end stays and this one follows the finger. */
+    private void grabHandle(float x, float y) {
+        float[] p = handlePos(dragHandle == 2);
+        if (p == null) {
+            dragHandle = 0;
+            return;
+        }
+        // the handle hangs under its line, the finger holds it there; what moves through the text is its corner
+        grabDx = x - p[0];
+        grabDy = y - (p[1] - paint.getTextSize() * 0.5f);
+        fixed = dragHandle == 1 ? selB : selA;
+        dragX = p[0];
+        dragY = y - grabDy;
+        host.onSelection(false);
+    }
+
     private void extendSelection(float x, float y) {
         if (selSlot == null || selSlot != cur) return;
-        int o = hit(x, y);
-        if (o < 0) return;
-        if (dragHandle == 1) selA = Math.min(o, selB - 1);
-        else if (dragHandle == 2) selB = Math.max(o + 1, selA + 1);
-        else if (o < anchorA) {
-            selA = o;
-            selB = anchorB;
-        } else if (o >= anchorB) {
-            selA = anchorA;
-            selB = o + 1;
+        int a = selA, b = selB;
+        if (dragHandle != 0) {
+            dragX = x - grabDx;
+            dragY = y - grabDy;
+            int o = locate(dragX, dragY, false, true);
+            if (o < 0) return;
+            // a handle pulled past the other end simply becomes the other end
+            if (o < fixed) {
+                selA = o;
+                selB = fixed;
+            } else if (o > fixed) {
+                selA = fixed;
+                selB = o;
+            } else if (dragHandle == 1) {
+                selA = Math.max(0, fixed - 1);
+                selB = fixed;
+            } else {
+                selA = fixed;
+                selB = Math.min(cur.text.length(), fixed + 1);
+            }
         } else {
-            selA = anchorA;
-            selB = anchorB;
+            dragX = x;
+            dragY = y;
+            int o = hit(x, y);
+            if (o < 0) return;
+            if (o < anchorA) {
+                selA = o;
+                selB = anchorB;
+            } else if (o >= anchorB) {
+                selA = anchorA;
+                selB = o + 1;
+            } else {
+                selA = anchorA;
+                selB = anchorB;
+            }
         }
-        invalidate();
+        magnify(dragX, dragY);
+        // the finger moves many times within one character: only a change is drawn
+        if (a != selA || b != selB) invalidate();
     }
+
+    /** The enlarged view of the text under the finger that the system shows while text is selected (Android 9+). */
+    private void magnify(float x, float y) {
+        if (android.os.Build.VERSION.SDK_INT < 28) return;
+        try {
+            if (magnifier == null) magnifier = new android.widget.Magnifier(this);
+            ((android.widget.Magnifier) magnifier).show(Math.max(0, Math.min(x, getWidth())), Math.max(0, Math.min(y, getHeight())));
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private void endDrag() {
+        removeCallbacks(edgeStep);
+        edgeOn = false;
+        if (android.os.Build.VERSION.SDK_INT >= 28 && magnifier != null) ((android.widget.Magnifier) magnifier).dismiss();
+    }
+
+    /**
+     * -1 / 1 while the drag is held where the selection wants to go on: near the top or bottom edge of
+     * scrolled text; on a page, above its first or below its last line (the handle's corner, which a finger
+     * holding the handle on the last line keeps in the middle of that line).
+     */
+    private int edgeDir() {
+        if (!ready()) return 0;
+        if (mode == SCROLL) {
+            float band = 36 * density;
+            return dragY < contentTop + band ? -1 : dragY > contentBottom - band ? 1 : 0;
+        }
+        int[] vis = visibleLines();
+        if (vis[1] <= vis[0]) return 0;
+        float top = cur.layout.lines.get(vis[0]).top + originY(0);
+        float bottom = cur.layout.lines.get(vis[1] - 1).bottom + originY(Math.max(0, colOf(vis[1] - 1)));
+        return dragY < top ? -1 : dragY > bottom ? 1 : 0;
+    }
+
+    private void watchEdge() {
+        if (edgeOn || edgeDir() == 0) return;
+        edgeOn = true;
+        postDelayed(edgeStep, mode == SCROLL ? 0 : 650);
+    }
+
+    /**
+     * A selection is not bound to what fits on screen: held at the edge, scrolled text moves on under the
+     * finger and a paged chapter turns its page (within the chapter), the selection growing along.
+     */
+    private final Runnable edgeStep = new Runnable() {
+        @Override
+        public void run() {
+            int dir = edgeDir();
+            if ((dragHandle == 0 && !longFired) || selSlot == null || selSlot != cur || !ready() || dir == 0) {
+                edgeOn = false;
+                return;
+            }
+            float fx = dragHandle != 0 ? dragX + grabDx : dragX, fy = dragHandle != 0 ? dragY + grabDy : dragY;
+            if (mode == SCROLL) {
+                float max = Math.max(0, columnHeight(cur) - (contentBottom - contentTop));
+                float to = Math.max(0, Math.min(max, scrollY + dir * 7 * density));
+                if (to != scrollY) {
+                    scrollY = to;
+                    extendSelection(fx, fy);
+                    invalidate();
+                }
+                postOnAnimation(this);
+            } else {
+                int to = page + dir;
+                if (to >= 0 && to < pages(cur)) {
+                    page = to;
+                    notifyPosition();
+                    extendSelection(fx, fy);
+                    invalidate();
+                }
+                postDelayed(this, 900);
+            }
+        }
+    };
 
     private void dropSelection() {
         if (selSlot == null) return;
         selSlot = null;
         dragHandle = 0;
+        endDrag();
         if (host != null) host.onSelection(false);
     }
 
@@ -1618,14 +2024,21 @@ public class PageView extends View {
         return hasSelection() ? selB : 0;
     }
 
-    /** Grows the selection to whole paragraphs. */
-    public void selectParagraphs() {
+    /** Grows the selection: to whole sentences first, and when it is that already, to whole paragraphs. */
+    public void growSelection() {
         if (!hasSelection()) return;
         String t = selSlot.text;
-        while (selA > 0 && t.charAt(selA - 1) != '\n') selA--;
-        while (selB < t.length() && t.charAt(selB) != '\n') selB++;
-        anchorA = selA;
-        anchorB = selB;
+        int a = Math.min(selA, t.length()), b = Math.max(a, Math.min(selB, t.length()));
+        while (a > 0 && t.charAt(a - 1) != '\n' && !sentenceEnd(t.charAt(a - 1))) a--;
+        while (b < t.length() && t.charAt(b) != '\n' && !(b > a && sentenceEnd(t.charAt(b - 1)))) b++;
+        // take the closing quotes along
+        while (b < t.length() && t.charAt(b) != '\n' && (sentenceEnd(t.charAt(b)) || "\u201D\u2019\u300D\u300F\uFF09)\"".indexOf(t.charAt(b)) >= 0)) b++;
+        if (a == selA && b == selB) {
+            while (a > 0 && t.charAt(a - 1) != '\n') a--;
+            while (b < t.length() && t.charAt(b) != '\n') b++;
+        }
+        selA = anchorA = a;
+        selB = anchorB = b;
         invalidate();
         host.onSelection(true);
     }
@@ -1634,7 +2047,7 @@ public class PageView extends View {
     public RectF selectionBounds() {
         float[] a = handlePos(false), b = handlePos(true);
         float top = a == null ? contentTop : a[1] - paint.getTextSize() * lineMult;
-        float bottom = b == null ? contentBottom : b[1] + 20 * density;
+        float bottom = b == null ? contentBottom : b[1] + 2 * HANDLE_R * density + 2 * density;
         return new RectF(0, top, getWidth(), bottom);
     }
 

@@ -98,6 +98,12 @@
     <string name="err_server">网站自己出了故障&#xFF0C;过一会儿再试。</string>
     <string name="err_ad">网站接连用广告页顶替了这一页。再试一次通常就好。</string>
     <string name="err_error_page">网站返回的是一条出错提示&#xFF0C;不是正文。</string>
+    <string name="err_captcha">网站要求进行人机验证&#xFF0C;完成验证后才能继续加载。</string>
+    <string name="verify">去验证</string>
+    <string name="verify_title">网站验证</string>
+    <string name="verify_hint">请按页面提示完成验证&#xFF0C;正文出现后本窗口会自动关闭。</string>
+    <string name="verify_done">验证通过</string>
+    <string name="verify_close">关闭</string>
     <string name="err_no_text">这个页面上没有找到正文。</string>
     <string name="err_timeout">网站太久没有回应。</string>
     <string name="err_network">连不上网站&#xFF0C;请检查网络。</string>
@@ -105,6 +111,7 @@
     <string name="first_chapter">已经是第一章了</string>
     <string name="looking_for_next">正在查找下一章…</string>
     <string name="blocked_hijack">已拦截跳往 %s 的广告&#xFF0C;正在打开原链接</string>
+    <string name="no_next_yet">网站上还没有下一章&#xFF0C;点重试再查一次。</string>
     <string name="last_chapter">已经是最后一章了</string>
     <string name="contents">目录</string>
     <string name="night">夜间</string>
@@ -131,6 +138,12 @@
     <string name="web_page">原网页</string>
     <string name="add_shelf_prompt">把《%s》加入书架&#xFF1F;</string>
     <string name="not_now">暂不</string>
+    <string name="dont_ask_again">不再询问</string>
+    <string name="dont_ask_note">可在设置的“阅读”中修改</string>
+    <string name="pref_leave_unshelved">退出未加入书架的书时</string>
+    <string name="leave_ask">询问是否加入书架</string>
+    <string name="leave_add">自动加入书架</string>
+    <string name="leave_skip">直接退出&#xFF0C;不加入</string>
     <string name="add">加入</string>
     <string name="caching_started">开始后台缓存 %d 章</string>
     <string name="nothing_to_cache">这些章节都已缓存</string>
@@ -139,6 +152,7 @@
     <string name="channel_download">章节缓存</string>
     <string name="dl_title">正在缓存《%s》</string>
     <string name="dl_progress">%1$d/%2$d 章</string>
+    <string name="dl_blocked">《%1$s》缓存已停止&#xFF08;已缓存 %2$d 章&#xFF09;&#xFF1A;网站要求验证或拒绝继续访问。请打开这本书完成验证&#xFF0C;过一会儿再继续缓存。</string>
     <string name="dl_done">《%1$s》缓存完成&#xFF1A;%2$d 章&#xFF0C;失败 %3$d 章</string>
     <string name="stop">停止</string>
 
@@ -156,6 +170,9 @@
     <string name="pref_auto_check_sum">打开书架时重新读取每本书的目录页&#xFF0C;最多每 2 小时一次。关闭后只有点刷新按钮才检查</string>
     <string name="pref_check_end">读到最后一页时检查新章节</string>
     <string name="pref_check_end_sum">读完最后一章时重新读取目录页</string>
+    <string name="pref_auto_retry">加载失败的章节每分钟自动重试</string>
+    <string name="pref_auto_retry_sum">阅读期间&#xFF0C;没加载出来的章节每分钟重新请求一次&#xFF0C;直到成功。关闭后只在点&#x201C;重试&#x201D;时请求</string>
+    <string name="retry_in">%d 秒后自动重试</string>
     <string name="pref_preload">预加载相邻章节</string>
     <string name="pref_preload_sum">提前下载上一章和下一章。关闭后翻到该章时才请求</string>
     <string name="pref_auto_toc">从章节页打开时获取目录</string>
@@ -291,8 +308,8 @@
     <string name="pref_search_custom_sum" formatted="false">搜索引擎选“自定义”时使用&#xFF0C;用 %s 代表搜索词</string>
     <string name="pref_search_suggest">搜索建议</string>
     <string name="pref_search_suggest_sum">输入时向搜索引擎请求建议</string>
-    <string name="pref_restore_tabs">启动时恢复标签页</string>
-    <string name="pref_restore_tabs_sum">重新打开上次的标签页</string>
+    <string name="pref_restore_tabs">启动时打开上次的页面</string>
+    <string name="pref_restore_tabs_sum">关闭时&#xFF0C;上次的标签页留在标签页视图里&#xFF0C;点选后才加载</string>
     <string name="pref_same_tab">新窗口链接在当前标签打开</string>
     <string name="pref_same_tab_sum">适合每章都弹出新窗口的网站</string>
     <string name="pref_long_press">按钮长按操作</string>
@@ -407,6 +424,7 @@
     <string name="rd_para_spacing">段间距</string>
     <string name="rd_letter_spacing">字间距</string>
     <string name="rd_indent">首行缩进</string>
+    <string name="rd_justify">两端对齐</string>
     <string name="rd_bold">加粗</string>
     <string name="rd_header">显示页眉</string>
     <string name="rd_footer">显示页脚</string>
@@ -420,6 +438,12 @@
     <string name="rd_rest_note">到时间后阅读器会锁定、直到休息结束。退出阅读器不会缩短休息时间。</string>
     <string name="rd_rest_now">该休息一下了\n%s</string>
     <string name="rd_filler">过滤章节首尾的无关内容</string>
+    <string name="rd_net_test">网络连通测试</string>
+    <string name="rd_net_testing">测试中…</string>
+    <string name="rd_net_ok">可以连接 · %1$d 毫秒 · HTTP %2$d</string>
+    <string name="rd_net_fail">%1$.1f 秒后仍连不上 · %2$s</string>
+    <string name="rd_net_again">重新测试</string>
+    <string name="rd_net_note">每次测试向 Bing 和 Google 各请求一个页面&#xFF0C;不会访问小说网站。</string>
     <string name="rd_replacements">文字替换</string>
     <string name="rd_orientation">屏幕方向</string>
     <string name="rd_orient_auto">跟随系统</string>
@@ -443,7 +467,7 @@
     <string name="rd_regex_bad">正则表达式有误</string>
     <string name="rd_copy">复制</string>
     <string name="rd_hide">屏蔽</string>
-    <string name="rd_paragraph">整段</string>
+    <string name="rd_paragraph">扩选</string>
     <string name="rd_speak_here">朗读</string>
     <string name="rd_copied">已复制</string>
     <string name="rd_hidden">已屏蔽。可在“更多 - 文字替换”中恢复。</string>
@@ -561,4 +585,18 @@
     <string name="sh_restore_warning">应用里现有的全部内容 (书架、进度、设置、笔记) 都会被备份覆盖、且无法撤销。</string>
     <string name="sh_restore_done">恢复完成。应用将关闭、请重新打开。</string>
     <string name="sh_stat_week">最近 7 天</string>
+    <string name="scan_qr">扫描二维码</string>
+    <string name="scan_hint">将二维码对准取景框</string>
+    <string name="scan_torch">手电筒</string>
+    <string name="scan_album">相册</string>
+    <string name="scan_none">图片中没有找到二维码</string>
+    <string name="scan_no_camera">无法使用相机&#xFF0C;仍可从相册图片识别。</string>
+    <string name="scan_result">扫描结果</string>
+    <string name="scan_open">打开</string>
+    <string name="scan_search">搜索</string>
+    <string name="scan_image">识别图中二维码</string>
+    <string name="search_custom_bad" formatted="false">地址需以 http 开头并包含 %s</string>
+    <string name="rd_search_short">全书搜索</string>
+    <string name="rd_search_end">结束搜索</string>
+    <string name="rd_search_fold">收起</string>
 </resources>

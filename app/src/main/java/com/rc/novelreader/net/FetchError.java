@@ -15,6 +15,8 @@ public class FetchError extends IOException {
     public static final int ERROR_PAGE = 3;
     /** Nothing readable on the page. */
     public static final int NO_TEXT = 4;
+    /** The site put a "prove that you are human" check in the way: only the user can get past it. */
+    public static final int CAPTCHA = 5;
 
     public final int kind;
     public final int code;
@@ -24,9 +26,19 @@ public class FetchError extends IOException {
         super(kind == HTTP ? "HTTP " + code
                 : kind == OFFSITE ? "Redirected to another site (" + detail + ")"
                 : kind == ERROR_PAGE ? "The site answered with an error page" + (detail == null || detail.isEmpty() ? "" : " (" + detail + ")")
+                : kind == CAPTCHA ? "The site asks for a human verification"
                 : "No readable text on the page");
         this.kind = kind;
         this.code = code;
         this.detail = detail == null ? "" : detail;
+    }
+
+    /** The site is turning this device away (a verification, "too many requests"): asking on only makes it worse. */
+    public boolean blocked() {
+        return kind == CAPTCHA || (kind == HTTP && code == 429);
+    }
+
+    public static boolean captcha(Throwable t) {
+        return t instanceof FetchError && ((FetchError) t).kind == CAPTCHA;
     }
 }

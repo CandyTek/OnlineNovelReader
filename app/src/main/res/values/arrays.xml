@@ -16,6 +16,16 @@
         <item>sogou</item>
         <item>custom</item>
     </string-array>
+    <string-array name="leave_unshelved_names">
+        <item>@string/leave_ask</item>
+        <item>@string/leave_add</item>
+        <item>@string/leave_skip</item>
+    </string-array>
+    <string-array name="leave_unshelved_values" translatable="false">
+        <item>ask</item>
+        <item>add</item>
+        <item>skip</item>
+    </string-array>
     <string-array name="ua_names">
         <item>@string/ua_default</item>
         <item>@string/ua_desktop</item>

@@ -65,7 +65,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     private Speaker speaker;
     private final com.rc.novelreader.sniff.FillerFilter filler = new com.rc.novelreader.sniff.FillerFilter();
     private List<ReaderPrefs.Theme> themeList = new ArrayList<>();
-    private View eyeView, restView, selBar, speechPanel, errorPanel, errWeb;
+    private View eyeView, restView, selBar, speechPanel;
     private TextView restText, speakToggle, speakTimer, rateValue, pitchValue;
     /** The user moved to another place while the book is read aloud: the voice follows once the text is there. */
     private boolean speakFollow;
@@ -179,6 +179,8 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
         page.setHost(this);
         page.setLoadingText(getString(R.string.loading), getString(R.string.waited));
+        // an imported book has no page to open
+        page.setErrorLabels(getString(R.string.retry), book.local() ? null : getString(R.string.err_open_web), getString(R.string.verify));
         page.applyPrefs();
         sheets = new ReaderSheets(this);
         tools = new ReaderTools(this, sheets);
@@ -254,6 +256,14 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         restTick.run();
         keepAwake();
         lastTouch = now;
+        inFront = true;
+        if (ReplaceActivity.changed) {
+            // the replacements were edited on their own screen
+            ReplaceActivity.changed = false;
+            reprocess();
+        }
+        // the settings can be opened from the book, so the switch is read on every return
+        page.setAutoRetry(!book.local() && App.prefs().getBoolean("auto_retry", true), getString(R.string.retry_in));
         applySchedule(false);
         listenForShake(ReaderPrefs.shake);
     }
@@ -261,6 +271,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     @Override
     protected void onPause() {
         App.MAIN.removeCallbacks(savePosition);
+        inFront = false;
         App.prefs().edit().remove("reader_front").apply();
         saveProgress();
         ReaderPrefs.save();
@@ -291,7 +302,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     }
 
     private void saveProgress() {
-        if (book == null || !opened) return;
+        if (book == null || !opened || page.currentIdx() >= chapters.size()) return;
         Library.saveProgress(bookId, page.currentIdx(), page.currentOffset());
     }
 
@@ -331,7 +342,9 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     @Override
     public void requestChapter(final int idx) {
         if (idx < 0 || idx >= chapters.size()) {
-            App.MAIN.post(() -> page.setError(idx, ""));
+            // the page after the last chapter of a book without a chapter list: the reader wants the book to go on
+            if (idx == chapters.size() && hasTail()) App.MAIN.post(this::seekNext);
+            else App.MAIN.post(() -> page.setError(idx, "", false));
             return;
         }
         final Chapter c = chapters.get(idx);
@@ -355,12 +368,34 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         App.IO.execute(() -> {
             String text = null;
             Throwable error = null;
-            PageFetcher.watch((stage, attempt) -> App.MAIN.post(() -> {
+            // the site was really asked (text from the device passes no stage)
+            final boolean[] asked = {false};
+            PageFetcher.watch((stage, attempt) -> {
+                asked[0] = true;
+                App.MAIN.post(() -> {
                 if (isDestroyed() || !loading.contains(c.id)) return;
-                for (Chapter at : chapters) if (at.id == c.id) page.setLoadingDetail(at.idx, stageText(stage, attempt));
-            }));
+                for (Chapter at : chapters) {
+                    if (at.id != c.id) continue;
+                    page.setLoadingDetail(at.idx, stageText(stage, attempt));
+                    // its text is shown already and the reader waits on the page after it
+                    if (seekAfter == c.id) page.setLoadingDetail(at.idx + 1, getString(R.string.looking_for_next) + "\n" + stageText(stage, attempt));
+                }
+                });
+            });
+            final String[] soon = new String[1];
             try {
-                text = display(c, Library.loadChapter(b, c, force));
+                text = display(c, Library.loadChapter(b, c, force, raw -> {
+                    // The text is here, and the loader goes on to find out where the book continues (many seconds
+                    // in a rendering engine): the reader gets the chapter now instead of "loading" until then.
+                    final String shown = display(c, raw);
+                    soon[0] = shown;
+                    App.MAIN.post(() -> {
+                        if (isDestroyed() || shown == null || !loading.contains(c.id)) return;
+                        memory.put(c.id, shown);
+                        for (Chapter at : chapters) if (at.id == c.id && at != c && at.title.isEmpty()) at.title = c.title;
+                        deliver(c.id, shown, null);
+                    });
+                }));
             } catch (Throwable t) {
                 error = t;
             } finally {
@@ -368,11 +403,14 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             }
             final String body = text;
             final Throwable err = error;
+            final String early = soon[0];
             App.MAIN.post(() -> {
                 loading.remove(c.id);
                 if (isDestroyed()) return;
                 if (body != null) memory.put(c.id, body);
-                else if (keep != null) {
+                else if (early != null) {
+                    // only the search for the next chapter failed: the text stays
+                } else if (keep != null) {
                     // refreshing failed: the reader keeps what was there and is told why nothing changed
                     memory.put(c.id, keep);
                     deliver(c.id, keep, null);
@@ -381,7 +419,23 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
                 }
                 // loading may have named the chapter while the list was swapped for a newer copy
                 for (Chapter at : chapters) if (at.id == c.id && at != c && at.title.isEmpty()) at.title = c.title;
-                deliver(c.id, body, err);
+                if (early == null || (body != null && !body.equals(early))) deliver(c.id, body, err);
+                // The last chapter of a book without a chapter list was just read from the site, and its page
+                // named no next one: that answer is good for the page after it, should the reader turn there.
+                if (body != null && asked[0] && hasTail() && !chapters.isEmpty() && chapters.get(chapters.size() - 1).id == c.id) {
+                    endKnown = c.id;
+                    endKnownAt = android.os.SystemClock.elapsedRealtime();
+                }
+                if (seekAfter == c.id) {
+                    // the reader is on the page after this chapter, waiting for what this load found out
+                    seekAfter = -1;
+                    for (Chapter at : chapters) {
+                        if (at.id == c.id) {
+                            endSeek(at.idx + 1, body == null ? err : null);
+                            break;
+                        }
+                    }
+                }
             });
         });
     }
@@ -397,6 +451,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
                         : f.code == 401 || f.code == 403 || f.code == 429 ? R.string.err_refused
                         : f.code >= 500 ? R.string.err_server : R.string.err_other;
             } else if (f.kind == FetchError.OFFSITE) msg = R.string.err_ad;
+            else if (f.kind == FetchError.CAPTCHA) msg = R.string.err_captcha;
             else if (f.kind == FetchError.ERROR_PAGE) msg = R.string.err_error_page;
             else msg = R.string.err_no_text;
         } else if (t instanceof java.net.SocketTimeoutException) msg = R.string.err_timeout;
@@ -443,23 +498,40 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     }
 
     @Override
-    public void onChapterState() {
-        if (errorPanel == null) return;
-        boolean failed = opened && page.isError();
-        if (failed) {
-            // under the message, wherever the screen is tall or wide
-            int h = findViewById(R.id.root).getHeight();
-            if (h <= 0) h = getResources().getDisplayMetrics().heightPixels;
-            ((FrameLayout.LayoutParams) errorPanel.getLayoutParams()).bottomMargin = h * 3 / 10;
-            errWeb.setVisibility(book.local() ? View.GONE : View.VISIBLE);
-            errorPanel.requestLayout();
-        }
-        errorPanel.setVisibility(failed ? View.VISIBLE : View.GONE);
+    public void onOpenWeb(int idx) {
+        openWeb(idx);
     }
 
-    private void openWeb() {
-        int idx = page.currentIdx();
-        String url = idx < chapters.size() ? chapters.get(idx).url : book.detailUrl;
+    /**
+     * The site wants a person: its page is shown in a window over the book, the reader does what it asks, and
+     * the chapter is asked for again when the window closes (from the device when the window saw it arrive).
+     */
+    @Override
+    public void onVerify(final int idx) {
+        // from the page after the last chapter: the last chapter's page is the one that was refused
+        int at = idx >= chapters.size() ? chapters.size() - 1 : idx;
+        if (at < 0) return;
+        VerifyWindow.show(this, chapters.get(at).url, true, () -> {
+            if (!isDestroyed()) page.retry(idx);
+        });
+    }
+
+    /**
+     * Repeating a failed chapter by itself is only for somebody who is reading: the reader in front, no break,
+     * and a touch in the last ten minutes (or the book turning its own pages, or being read aloud).
+     */
+    @Override
+    public boolean mayAutoRetry() {
+        return inFront && !isDestroyed() && !book.local() && !resting()
+                && (autoOn || speaker.active() || System.currentTimeMillis() - lastTouch < 600000);
+    }
+
+    private boolean inFront;
+
+    private void openWeb(int idx) {
+        // from the page after the last chapter: the last chapter's page is where the site would show the way on
+        if (idx >= chapters.size() && !chapters.isEmpty()) idx = chapters.size() - 1;
+        String url = idx >= 0 && idx < chapters.size() ? chapters.get(idx).url : book.detailUrl;
         BrowserActivity.open(this, url);
     }
 
@@ -479,7 +551,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
                     speaker.speak(c.idx, titleOf(c), text, from);
                 }
             } else {
-                page.setError(c.idx, errorText(error));
+                page.setError(c.idx, errorText(error), true, FetchError.captcha(error));
                 if (current && speaker.active()) speaker.stop();
             }
             if (tocPanel.getVisibility() == View.VISIBLE) tocAdapter.notifyDataSetChanged();
@@ -496,6 +568,8 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
 
     @Override
     public void onPosition(int idx, int pg, int pages, int offset) {
+        // the page after the last chapter is no place in the book
+        if (idx >= chapters.size()) return;
         // text passed since the last position, for the statistics; jumps are not reading
         if (idx == statIdx && offset > statOffset && offset - statOffset < 4000) pendingChars += offset - statOffset;
         statIdx = idx;
@@ -525,8 +599,12 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
     @Override
     public void onEdge(boolean end) {
         stopAuto();
-        if (end && book.linked) {
-            extendLinked();
+        if (end && hasTail()) {
+            // the page after the last chapter has its own button; no request for every further tap
+            if (page.currentIdx() >= chapters.size()) return;
+            // the last chapter known did not load: its page is the one that names the next, so ask for it again
+            if (page.isError()) page.retry();
+            else if (!page.isLoading()) openTail();
             return;
         }
         App.toast(getString(end ? R.string.last_chapter : R.string.first_chapter));
@@ -534,23 +612,55 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         if (end && !book.linked && App.prefs().getBoolean("check_at_end", false)) refreshToc(false, false);
     }
 
+    /** A book without a chapter list ends in a page of its own, where the search for the next chapter is shown. */
+    private boolean hasTail() {
+        return book.linked && !book.local();
+    }
+
+    private void openTail() {
+        if (speaker.active()) speakFollow = true;
+        openAt(chapters.size(), 0);
+        bindBook();
+    }
+
+    private boolean seeking;
+    /** Id of the last chapter when the site has just said that nothing follows it, and when it said so. */
+    private long endKnown = -1, endKnownAt;
+    /** Id of the last chapter while its own load is still asking the site where the book goes on, else -1. */
+    private long seekAfter = -1;
+
     /**
      * A book without a chapter list only knows the next chapter from the previous one's "next" link. When that
-     * link was missing or an ad, the end of the list is not the end of the book: ask the last page again.
+     * link was missing or an ad, the end of the list is not the end of the book: ask the last page again. Called
+     * when the page view turns to the place after the last chapter, and everything is reported on that page.
      */
-    private void extendLinked() {
-        if (refreshingToc) return;
-        refreshingToc = true;
+    private void seekNext() {
+        if (isDestroyed() || seeking) return;
+        final int at = chapters.size();
         final String tip = getString(R.string.looking_for_next);
-        showTip(tip, 0);
+        final Chapter last = chapters.isEmpty() ? null : chapters.get(at - 1);
+        page.setLoadingDetail(at, tip);
+        if (last != null && loading.contains(last.id)) {
+            // that very question is being asked right now: no second request, the answer comes with that load
+            seekAfter = last.id;
+            return;
+        }
+        if (last != null && endKnown == last.id && android.os.SystemClock.elapsedRealtime() - endKnownAt < 600000) {
+            // asked minutes ago, while loading that chapter: the same answer without the same request.
+            // Once only: the Retry button on this page is a new question.
+            endKnown = -1;
+            endSeek(at, null);
+            return;
+        }
+        seeking = true;
         final Book b = book;
-        final Chapter last = chapters.isEmpty() ? null : chapters.get(chapters.size() - 1);
         App.IO.execute(() -> {
-            boolean grew = false;
             Throwable error = null;
-            watchTip(tip);
+            PageFetcher.watch((stage, attempt) -> App.MAIN.post(() -> {
+                if (!isDestroyed() && seeking) page.setLoadingDetail(at, tip + "\n" + stageText(stage, attempt));
+            }));
             try {
-                grew = Library.extendLinked(b);
+                Library.extendLinked(b);
             } catch (Throwable t) {
                 error = t;
             } finally {
@@ -563,33 +673,48 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
                 now = last == null ? null : display(last, Library.cachedText(last));
             } catch (RuntimeException ignored) {
             }
-            final boolean more = grew;
             final String text = now;
             final Throwable err = error;
             App.MAIN.post(() -> {
-                refreshingToc = false;
-                seekTip.setVisibility(View.GONE);
+                seeking = false;
                 if (isDestroyed()) return;
                 boolean changed = text != null && !text.equals(memory.get(last.id));
                 if (changed) {
                     memory.put(last.id, text);
                     noteRanges.remove(last.id);
                 }
-                if (more) {
-                    reloadChapters();
-                    // the reader asked for the next chapter: go there instead of waiting for a second tap
-                    if (page.currentIdx() + 1 < chapters.size()) jumpTo(page.currentIdx() + 1);
-                    return;
-                }
-                if (speaker.waiting()) speaker.stop();
-                if (changed) {
-                    reloadChapters();
-                    deliver(last.id, text, null);
-                }
-                // "last chapter" only when the site was really asked and had nothing more
-                App.toast(err != null ? getString(R.string.next_failed, explain(err)[0]) : getString(R.string.last_chapter));
+                reloadChapters();
+                if (changed && page.holds(at - 1)) deliver(last.id, text, null);
+                endSeek(at, err);
             });
         });
+    }
+
+    /** The search for the chapter with index at is over: the book has it now, or the page there says why not. */
+    private void endSeek(int at, Throwable err) {
+        if (at < chapters.size()) {
+            if (page.holds(at)) requestChapter(at);
+            bindBook();
+            return;
+        }
+        if (speaker.waiting()) speaker.stop();
+        android.text.SpannableStringBuilder sb = new android.text.SpannableStringBuilder();
+        if (err != null) {
+            // "last chapter" only when the site was really asked and had nothing more; a failure is a failure
+            String[] e = explain(err);
+            sb.append(getString(R.string.next_failed, e[0]));
+            int from = sb.length();
+            sb.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD), 0, from, 0);
+            if (!e[1].isEmpty()) {
+                sb.append("\n").append(e[1]);
+                sb.setSpan(new android.text.style.RelativeSizeSpan(0.8f), from, sb.length(), 0);
+            }
+        } else {
+            sb.append(getString(R.string.last_chapter));
+            sb.setSpan(new android.text.style.StyleSpan(android.graphics.Typeface.BOLD), 0, sb.length(), 0);
+            sb.append("\n").append(getString(R.string.no_next_yet));
+        }
+        page.setError(at, sb, err != null, FetchError.captcha(err));
     }
 
     @Override
@@ -710,6 +835,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         findViewById(R.id.btnReload).setVisibility(book.local() ? View.GONE : View.VISIBLE);
         findViewById(R.id.btnWeb).setVisibility(book.local() ? View.GONE : View.VISIBLE);
         page.setShowPercent(!book.linked);
+        page.setTail(hasTail());
         seek.setEnabled(!book.linked || chapters.size() > 2);
     }
 
@@ -742,6 +868,8 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
                 chip.setEnabled(true);
                 reloadChapters();
                 if (manual) {
+                    // the list is behind a human check: here it is, and Refresh works once it is passed
+                    if (FetchError.captcha(err) && !book.tocUrl.isEmpty()) VerifyWindow.show(ReaderActivity.this, book.tocUrl, false, null);
                     if (err != null) App.toast(getString(R.string.toc_failed, explain(err)[0]));
                     else if (chapters.size() <= before) App.toast(getString(R.string.no_updates));
                 }
@@ -776,6 +904,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             return;
         }
         List<Chapter> list = Db.chapters(bookId);
+        final int was = chapters.size();
         long curId = -1;
         String curTitle = "";
         if (opened && page.currentIdx() < chapters.size()) {
@@ -797,6 +926,9 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         }
         if (grewOnly) {
             page.chaptersChanged();
+            // The place after the last chapter has become a chapter without anybody waiting for the answer here
+            // (it was found by a load that began earlier): the page there must not stay as it is.
+            if (chapters.size() > was && was > 0 && page.holds(was) && !seeking && seekAfter < 0) requestChapter(was);
             return;
         }
         int idx = -1;
@@ -856,6 +988,12 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         int idx = page.currentIdx(), off = page.currentOffset();
         if (speaker.active()) speaker.stop();
         openAt(idx, off);
+    }
+
+    /** Adds a view that floats over the page (and its warm tint) but stays under the menus and panels. */
+    void addOverPage(View v, FrameLayout.LayoutParams lp) {
+        FrameLayout root = findViewById(R.id.root);
+        root.addView(v, Math.min(2, root.getChildCount()), lp);
     }
 
     /** Marks a passage for a few seconds (a search hit). */
@@ -952,7 +1090,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             page.setLoading(idx);
             load(c, true, shown);
         });
-        findViewById(R.id.btnWeb).setOnClickListener(v -> openWeb());
+        findViewById(R.id.btnWeb).setOnClickListener(v -> openWeb(page.currentIdx()));
         findViewById(R.id.btnPrev).setOnClickListener(v -> {
             if (page.currentIdx() > 0) jumpTo(page.currentIdx() - 1);
             else App.toast(getString(R.string.first_chapter));
@@ -1251,6 +1389,9 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         return value;
     }
 
+    private static final int SEL_COLS = 4;
+    private int selRows = 3;
+
     private void buildOverlays() {
         FrameLayout root = findViewById(R.id.root);
         // warm tint over the page, under the menus
@@ -1258,56 +1399,35 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
         eyeView.setVisibility(View.GONE);
         root.addView(eyeView, 1, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        // what can be done about a chapter that failed, under its message and under the menus
-        LinearLayout ep = new LinearLayout(this);
-        int[] names = {R.string.retry, R.string.err_open_web};
-        for (int i = 0; i < names.length; i++) {
-            final boolean retry = i == 0;
-            TextView t = new TextView(this);
-            t.setText(names[i]);
-            t.setTextSize(15);
-            t.setTextColor(0xFFFFFFFF);
-            t.setGravity(android.view.Gravity.CENTER);
-            t.setBackgroundResource(R.drawable.tip_bg);
-            t.setPadding(App.dp(22), 0, App.dp(22), 0);
-            t.setOnClickListener(v -> {
-                if (retry) page.retry();
-                else openWeb();
-            });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, App.dp(44));
-            lp.setMargins(App.dp(8), 0, App.dp(8), 0);
-            ep.addView(t, lp);
-            if (!retry) errWeb = t;
-        }
-        errorPanel = ep;
-        errorPanel.setVisibility(View.GONE);
-        root.addView(errorPanel, 2, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-                android.view.Gravity.BOTTOM | android.view.Gravity.CENTER_HORIZONTAL));
-
-        // menu next to selected text, two rows
+        // menu next to selected text: rows of four, wide enough for the labels of either language
         LinearLayout bar = new LinearLayout(this);
         bar.setOrientation(LinearLayout.VERTICAL);
         bar.setBackgroundResource(R.drawable.tip_bg);
         bar.setPadding(App.dp(4), 0, App.dp(4), 0);
         int[] labels = {R.string.rd_copy, R.string.rt_highlight, R.string.rt_note, R.string.rt_lookup, R.string.rd_speak_here,
-                R.string.rd_replace, R.string.rd_hide, R.string.rd_paragraph, R.string.rt_translate, R.string.share};
+                R.string.rd_search_short, R.string.rd_paragraph, R.string.rt_translate, R.string.rd_replace, R.string.rd_hide,
+                R.string.share};
+        // the numbers selectionAction knows the entries by
+        final int[] ids = {0, 1, 2, 3, 4, 10, 7, 8, 5, 6, 9};
         LinearLayout line = null;
         for (int i = 0; i < labels.length; i++) {
-            if (i % 5 == 0) {
+            if (i % SEL_COLS == 0) {
                 line = new LinearLayout(this);
                 bar.addView(line);
             }
-            final int which = i;
+            final int which = ids[i];
             TextView t = new TextView(this);
             t.setText(labels[i]);
             t.setTextSize(13.5f);
             t.setTextColor(0xFFFFFFFF);
             t.setGravity(android.view.Gravity.CENTER);
-            t.setPadding(App.dp(6), 0, App.dp(6), 0);
-            t.setMinWidth(App.dp(60));
+            t.setPadding(App.dp(5), 0, App.dp(5), 0);
+            t.setSingleLine(true);
+            t.setMinWidth(App.dp(74));
             t.setOnClickListener(v -> selectionAction(which));
-            line.addView(t, new LinearLayout.LayoutParams(0, App.dp(42), 1));
+            line.addView(t, new LinearLayout.LayoutParams(0, App.dp(40), 1));
         }
+        selRows = (labels.length + SEL_COLS - 1) / SEL_COLS;
         selBar = bar;
         selBar.setVisibility(View.GONE);
         root.addView(selBar, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
@@ -1386,7 +1506,7 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             return;
         }
         android.graphics.RectF r = page.selectionBounds();
-        int h = App.dp(84);
+        int h = App.dp(40) * selRows;
         float y = r.top - h - App.dp(10);
         if (y < App.dp(28)) y = Math.min(r.bottom + App.dp(10), page.getHeight() - h - App.dp(28));
         selBar.setY(y);
@@ -1464,11 +1584,16 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
                 break;
             }
             case 7:
-                page.selectParagraphs();
+                page.growSelection();
                 break;
             case 8:
                 page.clearSelection();
                 tools.translate(sel);
+                break;
+            case 10:
+                // every place in the book where the selected words occur
+                page.clearSelection();
+                sheets.search(sel);
                 break;
             default:
                 page.clearSelection();
@@ -1530,9 +1655,8 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             if (idx + 1 < chapters.size()) {
                 openAt(idx + 1, 0);
                 bindBook();
-            } else if (book.linked) {
-                if (page.currentIdx() != idx) openAt(idx, 0);
-                extendLinked();
+            } else if (hasTail()) {
+                openTail();
             } else {
                 App.toast(getString(R.string.last_chapter));
                 speaker.stop();
@@ -1902,16 +2026,39 @@ public class ReaderActivity extends Activity implements PageView.Host, Events.Li
             return;
         }
         if (!book.inShelf && opened) {
-            new AlertDialog.Builder(this)
-                    .setMessage(getString(R.string.add_shelf_prompt, book.title))
-                    .setPositiveButton(R.string.add, (d, w) -> {
-                        Library.setShelf(bookId, true);
-                        finish();
-                    })
-                    .setNegativeButton(R.string.not_now, (d, w) -> finish())
-                    .show();
-            return;
+            String standing = App.prefs().getString("leave_unshelved", "ask");
+            if ("add".equals(standing)) Library.setShelf(bookId, true);
+            else if (!"skip".equals(standing)) {
+                askShelf();
+                return;
+            }
         }
         super.onBackPressed();
+    }
+
+    /** Leaving a book that is not on the shelf. With the box ticked the answer given becomes the standing one. */
+    private void askShelf() {
+        final android.widget.CheckBox again = new android.widget.CheckBox(this);
+        again.setText(R.string.dont_ask_again);
+        again.setTextSize(14);
+        FrameLayout box = new FrameLayout(this);
+        box.setPadding(App.dp(18), App.dp(6), App.dp(18), 0);
+        box.addView(again);
+        new AlertDialog.Builder(this)
+                .setMessage(getString(R.string.add_shelf_prompt, book.title))
+                .setView(box)
+                .setPositiveButton(R.string.add, (d, w) -> {
+                    if (again.isChecked()) App.prefs().edit().putString("leave_unshelved", "add").apply();
+                    Library.setShelf(bookId, true);
+                    finish();
+                })
+                .setNegativeButton(R.string.not_now, (d, w) -> {
+                    if (again.isChecked()) {
+                        App.prefs().edit().putString("leave_unshelved", "skip").apply();
+                        App.toast(getString(R.string.dont_ask_note));
+                    }
+                    finish();
+                })
+                .show();
     }
 }

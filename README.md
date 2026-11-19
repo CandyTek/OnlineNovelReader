@@ -4,7 +4,8 @@ An Android browser that recognises novel pages on any site, strips the ads and c
 them into a native reading experience with a bookshelf and whole-book caching.
 
 - Package `com.rc.novelreader`, min SDK 23, target SDK 34, plain Java + framework views.
-- Only dependency: [jsoup](https://jsoup.org) (HTML parsing for the sniffing engine).
+- Dependencies: [jsoup](https://jsoup.org) (HTML parsing for the sniffing engine) and
+  [ZXing core](https://github.com/zxing/zxing) (reading QR codes; Apache 2.0).
 - UI languages: English and Simplified Chinese.
 
 ## Build, install, test
@@ -22,14 +23,24 @@ adb install -r app/build/outputs/apk/debug/NovelSniffer-debug.apk
 `BrowserActivity` is a tabbed WebView browser; each `Tab` owns a lazily created WebView, so restored and
 background tabs cost nothing until shown (at most six stay live, older ones reload on return).
 
-- **Tabs** - switcher sheet, background and incognito tabs, links that ask for a new window open as child tabs
-  (Back returns to the parent), reopen closed tab, session restore, crash recovery of a single tab.
-  Swipe left or right along the address bar for the neighbouring tab (the page follows the finger; swipe down
-  for the tab list), or swipe on the tab button to step through several tabs; a label shows where you will
-  land and the tab changes when the finger lifts.
+- **Tabs** - background and incognito tabs, links that ask for a new window open as child tabs
+  (Back returns to the parent), reopen closed tab, crash recovery of a single tab. The tab button opens a
+  **grid of previews**, two to a row, each with title, close button and the top of its page. A swipe along the
+  address bar (or on the tab button, where a short swipe crosses many tabs) turns the page into a card in a
+  **row of previews** that follows the finger, like the recent-apps view of Android; the row glides to the
+  nearest card when the finger lifts and only then is that tab switched to. The previews are drawn from what
+  is on screen and kept per tab, so they cost no request.
+- **Tabs after a restart** - the tabs of last time come back in the tab views with their previews, but none is
+  loaded until you pick it; the browser starts on the start page (a setting opens the last page instead).
 - **Address bar** - URL or search, suggestions from bookmarks, history and the search engine, paste-and-go,
-  security icon with certificate details, bookmark star, per-page blocked counter.
+  security icon with certificate details, bookmark star, per-page blocked counter. While you type (and on the
+  start page) the icon in front is the **search engine's**: tap it for a drop-down that switches engines.
+  On every page there is a **reading-mode button**: green when a novel was recognised (tap to read), else it
+  has the page looked at now.
 - **Start page** - search box, bookmark tiles, most visited sites, shortcuts to the bookshelf and library.
+- **QR codes** - "Scan QR code" (menu, start page, or a long-press action) reads a code with the camera or from
+  a gallery picture; a long press on a picture in a page reads the code in it. The content is shown first,
+  opening or searching it is your tap.
 - **Site icons** - the icon of every visited site is kept (one per host, no extra requests) and shown in
   bookmarks, history, start-page tiles, address suggestions and the tab list.
 - **Library** (`LibraryActivity`) - bookmarks (edit, import/export as a standard bookmarks HTML file), history,
@@ -96,11 +107,27 @@ continuous vertical scroll, keeping the previous and next chapter loaded so turn
 chapter boundary. `ReaderActivity` adds the menus: contents drawer (cached chapters highlighted,
 reversible), chapter slider, font size, line spacing, themes with a night toggle, brightness, volume-key
 paging, reload chapter, open the original page.
-While a chapter loads the page shows a spinner, the step the fetch is at (contacting the site, background
-browser, retry after an ad, looking for the next chapter) and the seconds waited. A chapter that fails says
-why in plain words with the technical detail underneath, and offers Retry and Open in browser; a site's
+While a chapter loads the page shows its heading, a spinner, the step the fetch is at (contacting the site,
+background browser, retry after an ad, looking for the next chapter) and the seconds waited; turning on
+waits until it is there instead of skipping it. A chapter that fails says why in plain words with the
+technical detail underneath, and has Retry and Open in browser on the page itself, so they turn and scroll
+with it and are also there when it is the next chapter showing under the one being read. As long as you
+keep reading, a failed chapter is asked for again by itself once a minute until it loads (the page counts
+down; Settings > "Retry a failed chapter every minute" turns it off); a site's
 error page (HTTP error status, or a "not found / try again / loading" page in the reader's template) is
 never stored as a chapter.
+A book without a contents page ends in a page of its own: turning past the last chapter shows the search for
+the next one there, then the chapter, or "this is the last chapter" / why the search failed with the same two
+buttons. The last chapter of such a book is shown as soon as its text is there, while the app is still finding
+out where the book goes on. Entering reading mode on a chapter that is open in the browser uses that page's
+text (and a contents page's list) instead of asking the site for it again. "More" has a connection test that
+asks Bing and Google for one page each, to tell a dead network from a dead site.
+When a site puts a "prove that you are human" check in the way, the app does not keep asking: the chapter's
+page says so and its button opens the site's check in a window over the book. Pass it there and the window
+closes by itself, the chapter taken from the page you just saw. Caching a book stops at once on such a check
+or on "too many requests". The fetchers also remember per site what they learned (pages that need the
+rendering engine, sites whose last chapter simply has no next link), so the same lesson is not paid for with
+a request every time.
 Reading position (chapter + text offset) is restored exactly, also after changing the font.
 
 Behind "More" in the reading menu:
@@ -118,7 +145,7 @@ Behind "More" in the reading menu:
   few lines); `[` `]` or Ctrl+arrows change chapter; Home, M/F10 (menu), T (contents), N (night), F (search),
   B (bookmark), S (read aloud), A (auto scroll; Space pauses it), +/- (text size), Esc. The list is under Controls.
 - **Settings** opens the app settings without leaving the book.
-- **Layout**: left/right/top/bottom margins, line, paragraph and letter spacing, first-line indent, bold,
+- **Layout**: left/right/top/bottom margins, line, paragraph and letter spacing, first-line indent, justified lines (on by default), bold,
   header and footer on or off.
 - **Screen**: stays on always, for N minutes after the last touch (default 10), or as the system decides;
   orientation lock; warm eye-care tint.
@@ -127,10 +154,15 @@ Behind "More" in the reading menu:
   speed, pitch, sleep timer, continues into the next chapter and with the screen off.
 - **Filler filter**: author notes, vote begging, thanks to donors, group plugs and lines repeated in every
   chapter are left out at the start and end of chapters (`sniff/FillerFilter`, can be switched off).
-- **Selection**: long-press selects a sentence, drag or use the handles to extend it over paragraphs; then
-  copy, share, read aloud from there, replace or hide. Replacements (plain or regular expression, for one
-  book or all) are listed and edited under "Text replacements"; they never change the cached text.
-- Bookmarks, search in the cached chapters.
+- **Selection**: long-press selects the word under the finger (keep the finger down and move to take more).
+  The two handles hang under the line, outside the selected text, and are held, not aimed at: the selection
+  follows the handle's corner while a magnifier shows the spot (Android 9+); pull a handle past the other
+  end and they swap; hold it past the last line and the page turns (scrolled text moves on) with the
+  selection growing along. "Expand" grows it to the sentence, then to the paragraph. Then copy, highlight,
+  note, look up, search the whole book for it, share, read aloud from there, replace or hide. Replacements (plain or regular expression, for one
+  book or all) are listed and edited on their own screen, "Text replacements"; they never change the cached text.
+- Bookmarks, search in the cached chapters. Going to a hit folds the search into a small bar in the page's
+  top right corner (previous hit, position, next hit, end); its middle opens the list again as it was left.
 - **Page curl**: a fifth page-turn mode with a folding page, its shadow and the print showing through.
 - **Two pages side by side** when the screen is wide (landscape tablets); can be switched off.
 - **Highlights and notes**: five colours, a note per highlight, a list per book, export as text. Tap a
@@ -167,13 +199,13 @@ Books whose site has no contents page are read in *linked mode*: chapters are ch
 
 ### Module 4 - bookshelf (`shelf/`, `data/`)
 
-`ShelfActivity` is the home screen: cover grid, search box into the browser, sort orders, pinning,
+`ShelfActivity` is the home screen: cover grid (as many columns as the width holds, three on a phone), search box into the browser, sort orders, pinning,
 update checks (manual; automatic every 2 hours only if switched on) with "N new" badges, per-book cache /
 clear cache / TXT export / remove. `DownloadService` caches chapters in a foreground service
 (3 workers, stops itself if the site starts refusing requests). Chapter text is stored as files,
 everything else in SQLite (`data/Db`).
 With Settings > Reading > "Continue reading on start" (off by default) starting the app opens the book read
-last instead of the shelf; Back from it leads to the shelf as usual.
+last instead of the shelf; Back from it leads to the shelf as usual. Leaving a book that is not on the shelf asks whether to add it; "Do not ask again" keeps the answer given, and the setting next to it changes it back.
 
 ## Custom site rules
 
@@ -227,7 +259,8 @@ Novel sites often count requests per IP, so by default the app only requests wha
 browse, the chapter you turn to, a contents page you refresh. Everything else is a switch under
 Settings > "Optional requests to novel sites", off by default: automatic shelf update checks, the check for
 new chapters at the last page, preloading neighbouring chapters, fetching the contents page when a book is
-opened from a chapter page, and cover downloads. Search suggestions and restoring tabs on start are off by
+opened from a chapter page, and cover downloads. The one switch there that is on by default repeats a chapter
+that failed to load once a minute while you are reading. Search suggestions and restoring tabs on start are off by
 default too.
 
 ## Not included
@@ -235,5 +268,5 @@ default too.
 Switching a book between source sites, an LLM-based sniffing engine (the second engine is algorithmic), a
 different voice per character, paragraph comments, PDF/MOBI import and automatic sync (the WebDAV backup is by
 hand). In the browser: incognito tabs keep out of history and the tab session but
-share cookies with normal tabs (a WebView limitation), `blob:` downloads, QR scanning, page translation,
+share cookies with normal tabs (a WebView limitation), `blob:` downloads, bar codes other than the square ones, page translation,
 bookmark folders and sync are not implemented.

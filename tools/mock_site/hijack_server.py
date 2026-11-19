@@ -11,6 +11,8 @@ class H(http.server.BaseHTTPRequestHandler):
         sys.stderr.write("HIT %s #%d\n" % (p, n)); sys.stderr.flush()
         if p.startswith("/e/c") and p.endswith(".html"):
             return self.flaky(int(p[4:-5]), n)
+        if p.startswith("/v/c") and p.endswith(".html"):
+            return self.guarded(int(p[4:-5]))
         if not (p.startswith("/h/c") and p.endswith(".html")):
             self.send_response(404); self.end_headers(); return
         i = int(p[4:-5])
@@ -45,6 +47,31 @@ class H(http.server.BaseHTTPRequestHandler):
         b = body.encode("utf-8")
         self.send_response(404 if bad and i != 5 else 200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+    # /v/c1.html .. c8: a book without a contents page behind a human check. From chapter 3 on, a visitor without
+    # the cookie "human" gets the check instead (status 403): a page with one button that sets the cookie and
+    # loads the address again. /v/reset takes the pass away again (the cookie must then be "human=2").
+    need = "1"
+    def guarded(self, i):
+        ck = self.headers.get("Cookie") or ""
+        if i >= 3 and ("human=" + H.need) not in ck:
+            sys.stderr.write("    -> check\n"); sys.stderr.flush()
+            body = ("<html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
+                    "<title>安全验证</title></head><body style='text-align:center;font-size:20px'>"
+                    "<h2>安全验证</h2><p>请点击下方按钮完成验证后继续访问。</p>"
+                    "<button id='pass' style='font-size:28px;padding:40px 80px;margin-top:40px' "
+                    "onclick=\"document.cookie='human=%s;path=/';location.reload()\">我不是机器人</button>"
+                    "</body></html>") % H.need
+            b = body.encode("utf-8")
+            self.send_response(403); self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b); return
+        nav = "<div class='nav'>" + ("<a href='/v/c%d.html'>上一章</a>" % (i - 1) if i > 1 else "") \
+              + ("<a id='next_url' href='/v/c%d.html'>下一章</a>" % (i + 1) if i < 8 else "") + "</div>"
+        body = ("<html><head><meta charset='utf-8'><title>第%d章 关隘其%d_雁门记_某某书屋</title></head><body>"
+                "<h1>第%d章 关隘其%d</h1><div id='content'>%s</div>%s</body></html>") % (
+                i, i, i, i, "".join("<p>%s（%d-%d）</p>" % (PARA, i, k) for k in range(10)), nav)
+        b = body.encode("utf-8")
+        self.send_response(200 if i <= 8 else 404); self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
     def log_message(self, *a): pass
 http.server.ThreadingHTTPServer(("0.0.0.0", 8767), H).serve_forever()

@@ -111,6 +111,8 @@ public final class ReaderPrefs {
     public static boolean edgeBright = false;
     /** Two pages side by side when the screen is wide. */
     public static boolean twoPage = true;
+    /** Lines end flush at the right margin. */
+    public static boolean justify = true;
     /** Paged modes, automatic reading: a line uncovers the next page (true) or the page is turned when its time is up. */
     public static boolean autoSweep = true;
     /** Dim all but a movable band of lines. */
@@ -146,6 +148,7 @@ public final class ReaderPrefs {
         marginT = p.getInt("r_mt", 0);
         marginB = p.getInt("r_mb", 0);
         indent = p.getBoolean("r_indent", true);
+        justify = p.getBoolean("r_justify", true);
         bold = p.getBoolean("r_bold", false);
         header = p.getBoolean("r_header", true);
         footer = p.getBoolean("r_footer", true);
@@ -218,7 +221,7 @@ public final class ReaderPrefs {
         }
         App.prefs().edit().putInt("r_text", textSp).putInt("r_line", linePct).putInt("r_para", paraPct)
                 .putInt("r_letter", letterPct).putInt("r_ml", marginL).putInt("r_mr", marginR).putInt("r_mt", marginT)
-                .putInt("r_mb", marginB).putBoolean("r_indent", indent).putBoolean("r_bold", bold)
+                .putInt("r_mb", marginB).putBoolean("r_indent", indent).putBoolean("r_justify", justify).putBoolean("r_bold", bold)
                 .putBoolean("r_header", header).putBoolean("r_footer", footer).putString("r_font", font)
                 .putString("r_theme_key", themeKey).putString("r_day_key", dayKey).putInt("r_mode", mode)
                 .putInt("r_bright", brightness).putInt("r_screen_min", screenMin).putBoolean("r_vol", volumeKeys)

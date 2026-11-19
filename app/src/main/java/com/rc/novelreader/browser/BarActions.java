@@ -27,7 +27,7 @@ public final class BarActions {
             "bookmark", "find", "share", "copy_link",
             "fullscreen", "desktop", "night", "no_images",
             "settings", "clear_data", "exit",
-            "shelf", "reading_mode", "detect_novel", "continue_reading"};
+            "shelf", "reading_mode", "detect_novel", "continue_reading", "scan_qr"};
     private static final int[] NAMES = {R.string.none,
             R.string.act_close_tab, R.string.new_tab, R.string.incognito_tab, R.string.reopen_closed, R.string.act_tab_list,
             R.string.back, R.string.forward, R.string.act_back_list, R.string.start_page, R.string.refresh,
@@ -36,7 +36,7 @@ public final class BarActions {
             R.string.add_bookmark, R.string.find_in_page, R.string.share, R.string.copy_link,
             R.string.fullscreen, R.string.desktop_mode, R.string.night_mode, R.string.no_images,
             R.string.settings, R.string.clear_data, R.string.exit,
-            R.string.bookshelf, R.string.reading_mode, R.string.detect_novel, R.string.act_continue};
+            R.string.bookshelf, R.string.reading_mode, R.string.detect_novel, R.string.act_continue, R.string.scan_qr};
 
     private BarActions() {
     }

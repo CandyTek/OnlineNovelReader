@@ -41,6 +41,8 @@ public class DownloadService extends Service {
         public final AtomicInteger done = new AtomicInteger(), failed = new AtomicInteger();
         public int total;
         volatile boolean cancelled;
+        /** The site turned us away (verification, "too many requests"). */
+        volatile boolean blocked;
     }
 
     private static final Map<Long, Job> JOBS = new ConcurrentHashMap<>();
@@ -142,7 +144,8 @@ public class DownloadService extends Service {
             todo = pick(Db.chapters(bookId), from, count);
         }
         int ok = job.done.get() - job.failed.get();
-        Notification n = build(book.title, getString(R.string.dl_done, book.title, ok, job.failed.get()), 0, 0, false);
+        Notification n = build(book.title, job.blocked ? getString(R.string.dl_blocked, book.title, ok)
+                : getString(R.string.dl_done, book.title, ok, job.failed.get()), 0, 0, false);
         nm.notify((int) (1000 + bookId), n);
     }
 
@@ -165,6 +168,11 @@ public class DownloadService extends Service {
                         streak.set(0);
                     } catch (Throwable t) {
                         job.failed.incrementAndGet();
+                        // a verification or "too many requests": every further request deepens the ban
+                        if (t instanceof com.rc.novelreader.net.FetchError && ((com.rc.novelreader.net.FetchError) t).blocked()) {
+                            job.blocked = true;
+                            job.cancelled = true;
+                        }
                         // the site is refusing us: stop instead of hammering it
                         if (streak.incrementAndGet() >= 12) job.cancelled = true;
                     }

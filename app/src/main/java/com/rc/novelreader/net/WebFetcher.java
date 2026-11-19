@@ -97,8 +97,9 @@ public final class WebFetcher {
                             App.MAIN.postDelayed(grab[0], 1500);
                             return;
                         }
-                        boolean challenge = html.contains("Just a moment") || html.contains("challenge-platform")
-                                || html.contains("cf-browser-verification");
+                        // a check that passes by itself does so within seconds; one that wants a person never does
+                        boolean challenge = (html.contains("Just a moment") || html.contains("challenge-platform")
+                                || html.contains("cf-browser-verification")) && nav.checks++ < 10;
                         // a page still being built by its scripts is short; so is a site's error page, which never
                         // grows: an error status has had its moment above, anything else gets a few looks
                         boolean shell = html.length() < 600 && status < 400 && nav.looks++ < 4;
@@ -206,6 +207,8 @@ public final class WebFetcher {
         boolean waited;
         /** Times a short page was looked at again. */
         int looks;
+        /** Times a browser check was given another second to pass. */
+        int checks;
     }
 
     /** Status of the document (0 when the engine does not tell), its address and its markup, one per line. */
