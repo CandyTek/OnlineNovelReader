@@ -604,4 +604,20 @@
     <string name="rd_search_short">Search</string>
     <string name="rd_search_end">End search</string>
     <string name="rd_search_fold">Fold</string>
+    <string name="pref_app_update">Check for a new version on start</string>
+    <string name="pref_app_update_sum">Asks GitHub for the latest release of this app, at most once a day. No novel site is contacted</string>
+    <string name="pref_check_update">Check for a new version now</string>
+    <string name="up_checking">Checking for a new version…</string>
+    <string name="up_check_failed">Could not check for a new version: %s</string>
+    <string name="up_no_release">no release found</string>
+    <string name="up_latest">Version %s is the latest</string>
+    <string name="up_title">New version available</string>
+    <string name="up_versions">Installed: %1$s\nNew: %2$s</string>
+    <string name="up_size">Size: %.1f MB</string>
+    <string name="up_update">Update</string>
+    <string name="up_skip">Skip this version</string>
+    <string name="up_downloading">Downloading %s</string>
+    <string name="up_failed_title">Update failed</string>
+    <string name="up_failed">The new version could not be installed: %s</string>
+    <string name="up_open_page">Release page</string>
 </resources>

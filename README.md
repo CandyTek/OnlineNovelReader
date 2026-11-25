@@ -1,9 +1,16 @@
-# Novel Sniffer (小说嗅探阅读器)
+# OnlineNovelReader · 小说嗅探阅读器
+
+| | | |
+|:---:|:---:|:---:|
+| ![reader](img/reader.webp) | ![reading-settings](img/reading-settings.webp) | ![night-mode](img/night-mode.webp) |
+| ![bookshelf](img/bookshelf.webp) | ![browser](img/browser.webp) | ![browser-tools](img/browser-tools.webp) |
 
 An Android browser that recognises novel pages on any site, strips the ads and clutter, and turns
 them into a native reading experience with a bookshelf and whole-book caching.
 
 - Package `com.rc.novelreader`, min SDK 23, target SDK 34, plain Java + framework views.
+- **Updates** - on start the app asks GitHub (at most once a day, can be switched off) whether a newer release
+  exists and offers it: update (downloads and installs the release's package), cancel, or skip this version.
 - Dependencies: [jsoup](https://jsoup.org) (HTML parsing for the sniffing engine) and
   [ZXing core](https://github.com/zxing/zxing) (reading QR codes; Apache 2.0).
 - UI languages: English and Simplified Chinese.

@@ -190,6 +190,14 @@
             android:title="@string/pref_covers" />
     </PreferenceCategory>
     <PreferenceCategory android:title="@string/pref_cat_data">
+        <SwitchPreference
+            android:defaultValue="true"
+            android:key="app_update"
+            android:summary="@string/pref_app_update_sum"
+            android:title="@string/pref_app_update" />
+        <Preference
+            android:key="check_update"
+            android:title="@string/pref_check_update" />
         <Preference
             android:key="about"
             android:title="@string/pref_about" />

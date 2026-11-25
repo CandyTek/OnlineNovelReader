@@ -30,7 +30,8 @@ pages on arbitrary sites, strips ads, and reads them in a native reader with a b
   with a manual alternative where it makes sense. See "Optional requests" in section 6.
 - **Licence:** the repository carries a GPL-3.0 `LICENSE`. All code so far is original. Before copying code
   from another project, check that its licence is GPL-3.0-compatible and ask the owner.
-- **Git:** branch `main`, no remote configured. Commit or push only when asked.
+- **Git:** branch `main`, remote `origin` on GitHub (releases there feed the app's update check). Commit or
+  push only when asked.
 - **Two UI languages.** Every user-visible string goes into both `res/values/strings.xml` and
   `res/values-zh/strings.xml`. No hard-coded UI text in Java.
 - Package `com.rc.novelreader`, minSdk 23, targetSdk 34, compileSdk 35. Guard newer APIs with
@@ -65,7 +66,7 @@ adb -s 192.168.0.123:5555 install -r app/build/outputs/apk/debug/NovelSniffer-de
 ```
 
 The noise to filter from build output is the `source value 8` / deprecation warnings; anything else is real.
-Test results: `app/build/test-results/testDebugUnitTest/*.xml` (currently 42 tests in 7 classes).
+Test results: `app/build/test-results/testDebugUnitTest/*.xml` (currently 45 tests in 8 classes).
 
 ## 4. Test device
 
@@ -161,6 +162,7 @@ util/Urls.java           resolve, normalize, host, registrable, sameSite, chapte
 util/Texts.java          chapter-title patterns (STRONG/WEAK), Chinese numerals, wlen (CJK = 2)
 util/BookParser.java     pure Java: text file -> chapters, EPUB (zip + jsoup) -> chapters
 util/Hanzi.java          pure Java: simplified/traditional conversion from assets/hanzi.txt
+util/AppUpdate.java      pure Java: the GitHub "latest release" answer -> tag, notes, package; version comparison
 util/QrDecoder.java      pure Java around ZXing: a camera frame or a picture -> the text of the square code in it
 
 sniff/                   PURE JAVA, no android.* imports: runs in JVM tests
@@ -206,7 +208,8 @@ reader/                  PageView (own typesetting: StaticLayout per paragraph, 
                          TextRules (user replacements), Speaker + SpeakService (text-to-speech, system
                          engine or a web service), ReaderTools (dialogs: notes, statistics, word list, look-up,
                          AI, gestures, speed reading), Notes, Stats, Vocab, Ai (the optional assistant's HTTP)
-shelf/                   ShelfActivity (launcher), BookSheet, Covers/CoverView, DownloadService (book caching)
+shelf/                   ShelfActivity (launcher), BookSheet, Covers/CoverView, DownloadService (book caching),
+                         Updater (the app's own update: check, dialog, download, PackageInstaller session)
 data/                    Db (SQLite), Library (book logic), RuleStore (rules + novel hosts), Events, Book, Chapter,
                          LocalBooks (TXT/EPUB import), Backup (zip of everything, restore, WebDAV put/get)
 settings/                SettingsActivity (+ res/xml/prefs.xml), RulesActivity, ScriptsActivity
@@ -560,11 +563,31 @@ not block the domain (covered by `BrowserLogicTest`).
 | `search_suggest` | completions from the search engine | local history/bookmark suggestions |
 | `restore_tabs` | loading the tab that was in front last time on start | start page; last time's tabs wait unloaded in the tab views |
 | `auto_retry` (**on** by default, see "Failed chapters") | a failed chapter asked for again once a minute while reading | Retry button on the page |
+| `app_update` (**on** by default, see "App update") | one request to api.github.com on a launcher start, at most once a day | "Check for a new version now" in the settings |
 
 Still automatic because the book cannot be read without them: the contents fetch when a book has no chapters,
 completing a paginated list after opening from a book page, the one contents fetch when a chapter of a known
 book is not in its list, continuation pages of a split chapter, and the WebView retry in `PageFetcher` when
 plain HTTP yields nothing usable. Whole-book caching is user-started (3 workers, 120 ms pause; not configurable).
+
+### App update (owner's request, 2026-11-25)
+
+- `Updater.auto` (from `ShelfActivity.onCreate`) asks `api.github.com/repos/<owner>/<repo>/releases/latest`
+  once a day at most; the address of the project's own releases is the one host name allowed in code, and it
+  must never feed sniffing or fetching. The owner asked for the check to be automatic, so `app_update` is the
+  second switch that defaults to on; it contacts no novel site.
+- An automatic check that fails says nothing and is repeated at the next start (`app_update_at` is written only
+  after an answer). A release is newer when `AppUpdate.newer(tag, BuildConfig.VERSION_NAME)`: **the tag of a
+  release must be the `versionName` of its package** (bump `versionCode` with it), or the dialog returns
+  after every update.
+- The dialog: Update, Cancel (asked again the next day), "Skip this version" (`app_update_skip` = tag; the
+  manual check in the settings still offers it).
+- Update streams the release's first `.apk` asset into a `PackageInstaller` session (no file, no
+  FileProvider: there is no AndroidX) and commits it; the system asks the user for consent
+  (`REQUEST_INSTALL_PACKAGES`). A failed download or installation shows the reason with Retry and the
+  release's page. **The package must be signed with the key of the installed one**: the 1.0 release is not
+  signed with this machine's debug key, so a debug build cannot be updated to it
+  (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`), and a release signed with a new key locks every user out.
 
 ### Data
 
@@ -601,6 +624,11 @@ plain HTTP yields nothing usable. Whole-book caching is user-started (3 workers,
 6. Report what was verified on the device, what only by unit test, and what was not exercised.
 
 ## 9. Known gaps
+
+- The app update was run on the test device with a build that called itself 0.9 against the real 1.0 release:
+  dialog at the start, manual check, download, the system's consent screens, the failure dialog (signatures
+  differ), "skip this version" silencing the next automatic check. Not run: an installation that succeeds, a
+  check without network, the release-page button, cancelling a download.
 
 - The browser and reader additions of 2026-11-24 were run on the test device in portrait: the early look on a
   page whose load never ends, the reading-mode button, the tab grid, the carousel from the address bar and

@@ -58,6 +58,7 @@ public class ShelfActivity extends Activity implements Events.Listener {
         // a start from the launcher: not a file handed over, not the browser's shelf button
         ReaderActivity.resumeOnStart(this, Intent.ACTION_MAIN.equals(getIntent().getAction())
                 && getIntent().hasCategory(Intent.CATEGORY_LAUNCHER), savedInstanceState != null);
+        if (savedInstanceState == null) Updater.auto(this);
         status = findViewById(R.id.status);
         empty = findViewById(R.id.empty);
         search = findViewById(R.id.search);

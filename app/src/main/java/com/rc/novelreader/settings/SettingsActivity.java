@@ -89,6 +89,10 @@ public class SettingsActivity extends Activity {
                 sitesOffDialog();
                 return true;
             });
+            findPreference("check_update").setOnPreferenceClickListener(p -> {
+                com.rc.novelreader.shelf.Updater.check(getActivity(), true);
+                return true;
+            });
             findPreference("about").setOnPreferenceClickListener(p -> {
                 String version = "";
                 try {
