@@ -12,11 +12,19 @@ android {
         targetSdk 34
         versionCode 1
         versionName "1.0"
+        // Own runner (JUnit 4 through JUnitCore): the usual one is AndroidX. Never run connectedAndroidTest,
+        // it installs on every attached device; see AGENTS.md "On-device tests".
+        testInstrumentationRunner "com.rc.novelreader.testing.SuiteRunner"
     }
 
     buildTypes {
+        debug {
+            //minifyEnabled true
+        }
         release {
-            minifyEnabled false
+            //debuggable true
+            minifyEnabled true
+            shrinkResources true
             signingConfig signingConfigs.debug
         }
     }
@@ -40,7 +48,11 @@ dependencies {
     implementation 'org.jsoup:jsoup:1.17.2'
     // QR codes (owner's request). 3.3.x is the last line that runs below Android 7 (minSdk 23) as it is.
     implementation 'com.google.zxing:core:3.3.3'
+    // Memory leaks (owner's request). Debug builds only: it brings Kotlin and AndroidX with it, and none of
+    // that may reach a release. It reports to logcat (tag LeakCanary) and a notification; tools/smoke.py reads it.
+    //debugImplementation 'com.squareup.leakcanary:leakcanary-android:2.14'
     testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'junit:junit:4.13.2'
     // real org.json for JVM tests (android.jar only ships stubs)
     testImplementation 'org.json:json:20231013'
 }

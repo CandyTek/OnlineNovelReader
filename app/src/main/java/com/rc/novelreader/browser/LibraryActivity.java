@@ -163,7 +163,8 @@ public class LibraryActivity extends Activity {
             return true;
         });
         setContentView(root);
-        select(tab);
+        // the number comes from an intent: one that names no tab must not take the screen down
+        select(tab < 0 || tab > 3 ? 0 : tab);
     }
 
     @Override

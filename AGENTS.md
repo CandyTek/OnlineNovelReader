@@ -12,7 +12,9 @@ pages on arbitrary sites, strips ads, and reads them in a native reader with a b
 - **Two runtime dependencies: jsoup, and ZXing core for QR codes** (`com.google.zxing:core:3.3.3`, Apache 2.0,
   added at the owner's request on 2026-11-24; 3.3.x is the last line that runs on minSdk 23 without
   desugaring, so do not bump it). Do not add libraries without asking. `org.json` and JUnit are test-only
-  (Android provides `org.json` at runtime).
+  (Android provides `org.json` at runtime). **LeakCanary 2.14 is `debugImplementation` only** (owner's
+  request, 2026-11-25): it brings Kotlin and AndroidX into the debug package, and none of that may reach a
+  release or be called from the app's code.
 - **The owner wants the browser as feature-rich as possible.** When in doubt include the feature and say what
   was left out, rather than trimming.
 - **No hard-coded websites (owner's rule).** Never add a host name, a per-site selector or a per-site branch
@@ -50,7 +52,11 @@ pages on arbitrary sites, strips ads, and reads them in a native reader with a b
 4. **adb paths under Git Bash** get rewritten (`/sdcard/x` becomes `C:/Program Files/Git/sdcard/x`). Prefix
    with `MSYS_NO_PATHCONV=1`.
 5. **Low memory.** Gradle is capped at `-Xmx1024m` in `gradle.properties`; leave it.
-6. A method named `setImmersive(boolean)` clashes with `Activity.setImmersive`; similar framework names are
+6. **Windows lets two servers listen on one port**; requests then reach either. A mock server left running
+   from an earlier session makes pages come and go at random. `tools/smoke.py` refuses to start when its
+   ports answer; check `netstat -ano | grep LISTENING` when a mock page behaves oddly. Python also takes
+   seconds to start here: wait for the port before opening a page.
+7. A method named `setImmersive(boolean)` clashes with `Activity.setImmersive`; similar framework names are
    easy to hit in `Activity` subclasses.
 
 ## 3. Build, test, install
@@ -66,7 +72,10 @@ adb -s 192.168.0.123:5555 install -r app/build/outputs/apk/debug/NovelSniffer-de
 ```
 
 The noise to filter from build output is the `source value 8` / deprecation warnings; anything else is real.
-Test results: `app/build/test-results/testDebugUnitTest/*.xml` (currently 45 tests in 8 classes).
+Test results: `app/build/test-results/testDebugUnitTest/*.xml` (currently 47 tests in 8 classes).
+
+Two more layers run on a device (section 4): `sh tools/devtest.sh` (50 tests inside the app) and
+`python tools/smoke.py` (the app driven from the PC under hard conditions, with the leak report).
 
 ## 4. Test device
 
@@ -88,6 +97,54 @@ Test results: `app/build/test-results/testDebugUnitTest/*.xml` (currently 45 tes
   `https://www.zggdwx.com/xiyou.html`, `http://www.purepen.com/xyj/index.htm` (GB2312),
   `xiyouji.5000yan.com` (slow, sometimes times out).
 - Leave the device clean when done: `pm clear com.rc.novelreader`, remove files you pushed, stop servers.
+
+### On-device tests (`app/src/androidTest`, `tools/devtest.sh`)
+
+```sh
+sh tools/devtest.sh                                         # all 50, about five minutes
+sh tools/devtest.sh com.rc.novelreader.data.LibraryTest     # some classes, comma separated
+```
+
+- **Never run `gradlew connectedAndroidTest`**: it installs and runs on every attached device, the owner's
+  phone included, and the tests write into the app's data. The script builds, installs on one device
+  (`DEVICE=`, refuses the owner's phone), clears the app before and after. The runner itself refuses to start
+  when the app already holds a book or a history entry.
+- No AndroidX here either: `testing/SuiteRunner` is a plain `Instrumentation` that runs JUnit 4 through
+  `JUnitCore` (a new test class must be added to its `ALL` list); `testing/Ui` starts activities and waits on
+  the main thread. Test classes sit in the package of what they test and use package-private members
+  (`ReaderActivity.page`, `BrowserActivity.tabs`, `ChapterLayout`).
+- `testing/MiniSite` is an invented novel site served on 127.0.0.1 inside the test process (book with
+  contents, book chained by next links, GBK, 3000 chapters, a 4000-paragraph chapter, a 200 000-character
+  paragraph, 4000 nested elements, redirect loop, 8 MB body, cut body, slow, empty, random bytes, a human
+  check, a portal). It counts requests: several tests assert the request budget (one request per chapter,
+  nothing fetched ahead, background tabs silent, imported books silent).
+- What they cover: `Http`, `PageFetcher`, `Db`, `Library` (book from contents, growing contents, failed
+  chapter leaves nothing, eight readers of one chapter share one request, linked book, 3000 chapters),
+  `LocalBooks`, `Backup` (secrets never written, restore, hostile zip), `ChapterLayout` on extreme text and
+  page shapes, the reader on screen (five page modes, rotation, extreme settings, failed chapter and retry,
+  end of book, saved place, a huge paragraph), the browser on screen (sniffing, 14 + 20 tabs with at most six
+  WebViews, incognito, pages that are not pages), every other activity empty and full (120 books, 1500
+  history rows) and opened with nonsense extras.
+
+### Smoke test under hard conditions (`tools/smoke.py`)
+
+```sh
+python tools/smoke.py                 # all scenarios, about 25 minutes; --list names them
+python tools/smoke.py marathon churn  # some of them
+```
+
+Needs the debug build installed. It generates the mock site, starts the three servers (plain 8765,
+`chaos_server.py` 8766, hijack 8767), clears the app, and for each scenario checks logcat for a crash or ANR of
+the app and that the expected screen is in front. Scenarios: plain read, rotation storm, font scale and
+display density extremes, "don't keep activities", death in front, kill in the background with tabs, 40
+tabs, 400 page turns, the chaos site (503, cut connections, stalls), the site going away mid-book, the
+hijack / flaky / human-check books, open-close churn, and two monkey runs of 6000 events. At the end the app
+goes to the background and **LeakCanary's verdict is read from logcat** (also saved as `leakcanary.txt` in the
+log folder the script prints). It changes rotation, font scale, density, "don't keep activities" and the
+status bar on the device and restores them in a `finally`; if it is killed hard, run
+`adb shell wm density reset; adb shell settings put system font_scale 1.0; adb shell settings put global
+always_finish_activities 0; adb shell cmd statusbar disable-for-setup false`. Wi-Fi is never switched off:
+it carries adb. Network trouble is simulated on the server side instead.
 
 ### Mock novel site
 
@@ -250,7 +307,10 @@ assets/cosmetic.js       injected element hider; "__STRICT__" is replaced with t
 - A next/previous link that points at **another site** is never a chapter. The engine drops it and sets
   `ChapterContent.nextHijacked`, which tells the fetcher the real link is still unknown.
 - False positives seen and guarded against: search result pages (content-share penalty), server directory
-  listings, headings that link elsewhere. Add a `SnifferTest` case for every new one.
+  listings, headings that link elsewhere, and lists of books in id order ("newly added", rankings): a list
+  whose titles are not chapter titles counts as contents only when its links are the page's own
+  (`HeuristicEngine.ownLinks`: under the page's folder, or carrying its last name, number or query value;
+  a site's front page and a page with `og:novel` data are exempt). Add a `SnifferTest` case for every new one.
 
 ### Browser
 
@@ -355,6 +415,10 @@ assets/cosmetic.js       injected element hider; "__STRICT__" is replaced with t
   file `papers` until the next install. To add a background, drop the file in and note its source and
   licence in the `LICENSE.txt` there; a tile must repeat without bands or it will be taken for a sheet.
   A user's theme stores the file name (`p`); a file that has gone leaves the theme a flat colour.
+- **Timers of a view end with the view.** `PageView.onDetachedFromWindow` removes every pending callback
+  (retry of a failed chapter, long press, auto page, edge step): the one-minute retry timer used to keep a
+  closed reader and its chapters in memory until it fired (LeakCanary, 2026-11-25). A new `postDelayed` in a
+  view or activity needs its `removeCallbacks` on the way out.
 - Keyboard: `ReaderActivity.dispatchKeyEvent` -> `readerKey` takes keys before the views (a focused button
   would use up Space and Enter) and only while no menu is up; the volume keys stay in `onKeyDown`. A new
   shortcut also goes into the string `rd_keys_help` (both languages).
@@ -614,7 +678,9 @@ plain HTTP yields nothing usable. Whole-book caching is user-started (3 workers,
 
 ## 8. Before calling a change done
 
-1. `:app:testDebugUnitTest` passes; new engine or parsing logic has a JVM test.
+1. `:app:testDebugUnitTest` passes; new engine or parsing logic has a JVM test. For changes to fetching, the
+   library, the reader or the browser, `sh tools/devtest.sh` passes too; before a release also
+   `python tools/smoke.py` (no failed scenario, no application leak).
 2. `:app:assembleDebug` is clean apart from the known deprecation noise.
 3. Installed and exercised on the device against the mock site; for sniffing or ad-blocking changes also load
    `/book/88/1001.html` on **fresh data** (`pm clear`) and confirm the 2.5 s redirect is blocked and the
@@ -624,6 +690,15 @@ plain HTTP yields nothing usable. Whole-book caching is user-started (3 workers,
 6. Report what was verified on the device, what only by unit test, and what was not exercised.
 
 ## 9. Known gaps
+
+- The test layers of 2026-11-25 ran on the test device only (Android 13, portrait 1080x1920): 50 on-device
+  tests and the 14 smoke scenarios. They found and fixed: the bookmarks screen dying on a tab number that
+  does not exist, a list of books in id order taken for a book, and the retry timer holding a closed reader.
+  Not covered by any of them: real sites (everything runs against invented ones), the camera and QR
+  screen, reading aloud, the AI assistant, WebDAV, the app update, downloads, file pickers, permission
+  prompts, tablets and landscape-first devices, Android below 13, and the owner's phone. The monkey runs
+  are random: a pass says little, a failure is kept with its seed in the log folder. LeakCanary only sees
+  what was destroyed during the run (reader, shelf, settings screens; the browser lives as long as the app).
 
 - The app update was run on the test device with a build that called itself 0.9 against the real 1.0 release:
   dialog at the start, manual check, download, the system's consent screens, the failure dialog (signatures
@@ -659,6 +734,9 @@ plain HTTP yields nothing usable. Whole-book caching is user-started (3 workers,
   on its chapter above the restored browser; `run-as ... kill -9` is refused on that device). Not run: the
   place inside a long chapter (`savePosition`), the browser dying in front (`browser_front`), and a real
   WebView update.
+- `Urls.normalize` leaves the port out, so two sites on one host that differ only in the port are one site to
+  the library (same books, same cached chapters). Left as it is: changing the key would orphan the books
+  users have. The chaos server serves its book under another number for this reason.
 - Chapters that were stored as an error page before that fix stay as they are until reloaded in the reader.
 - `Library.extendLinked` (end-of-book retry) and the moved-domain acceptance in `PageFetcher` have not been run
   on a device.

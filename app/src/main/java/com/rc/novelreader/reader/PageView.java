@@ -578,6 +578,27 @@ public class PageView extends View {
 
     // ------------------------------------------------------------------ layout
 
+    /**
+     * A timer that is still pending holds the view, and through it the closed reader with its chapters, until
+     * it fires: the retry of a failed chapter did so for up to a minute (found by LeakCanary, 2026-11-25).
+     */
+    @Override
+    protected void onDetachedFromWindow() {
+        removeCallbacks(retryDue);
+        removeCallbacks(longPress);
+        removeCallbacks(autoFrame);
+        removeCallbacks(edgeStep);
+        if (pendingTap != null) removeCallbacks(pendingTap);
+        pendingTap = null;
+        super.onDetachedFromWindow();
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        scheduleRetry();
+    }
+
     @Override
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         if (cur != null && cur.state == READY && cur.layout != null && pendingOffset < 0) pendingOffset = currentOffset();

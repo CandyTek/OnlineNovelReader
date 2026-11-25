@@ -206,6 +206,43 @@ public class SnifferTest {
         assertEquals("M. Verne", r.book.author);
     }
 
+    /** "Newly added" and ranking pages list books in id order; their links lead away from the page. */
+    @Test
+    public void listOfBooksInIdOrderIsNotABook() {
+        String[] names = {"Low Tide", "The Lamplighter", "Salt", "What the Gulls Know", "Ferry", "A Door in the Sea Wall",
+                "Brine", "Night Market", "Undertow", "The Harbormaster", "Glass", "Homecoming"};
+        String[] pages = {"https://tales.example.com/new/", "https://tales.example.com/top/week.html",
+                "https://tales.example.com/list.php?sort=new"};
+        for (String page : pages) {
+            StringBuilder sb = new StringBuilder("<html><head><title>New web novels - Tales</title></head><body><h2>Newly added</h2><ul>");
+            for (int i = 0; i < names.length; i++) {
+                sb.append("<li>[Fantasy] <a href='/novel/").append(900 - i * 7).append("/'>").append(names[i]).append("</a> M. Verne</li>");
+            }
+            PageResult r = sniffer.analyze(page, sb.append("</ul></body></html>").toString());
+            assertEquals(page, PageResult.Type.NONE, r.type);
+        }
+    }
+
+    /** Unnumbered chapters in another folder than the book's page still belong to it: they carry its id. */
+    @Test
+    public void unnumberedListElsewhereIsTiedByTheBookId() {
+        String[] names = {"Low Tide", "The Lamplighter", "Salt", "What the Gulls Know", "Ferry", "A Door in the Sea Wall",
+                "Brine", "Night Market", "Undertow", "The Harbormaster", "Glass", "Homecoming"};
+        String[][] sites = {{"https://tales.example.com/info/731.html", "/read/731/%d.html"},
+                {"https://tales.example.com/book.php?id=731", "/read.php?id=731&cid=%d"},
+                {"https://tales.example.com/novel/glass-harbor.html", "/chapter/glass-harbor-%d"}};
+        for (String[] s : sites) {
+            StringBuilder sb = new StringBuilder("<html><head><title>The Glass Harbor - Web Novel - Chapters</title></head><body>"
+                    + "<h1>The Glass Harbor</h1><div>Author: M. Verne</div><ul class='chapter-list'>");
+            for (int i = 0; i < names.length; i++) {
+                sb.append("<li><a href='").append(String.format(s[1], 500 + i * 3)).append("'>").append(names[i]).append("</a></li>");
+            }
+            PageResult r = sniffer.analyze(s[0], sb.append("</ul></body></html>").toString());
+            assertEquals(s[0], PageResult.Type.DETAIL, r.type);
+            assertEquals(12, r.toc.size());
+        }
+    }
+
     @Test
     public void paginatedListExposesItsPages() {
         StringBuilder sb = new StringBuilder("<html><head><title>长安行章节目录_某某书屋</title></head><body><h1>长安行</h1><p>作者:柳三</p><div class='listmain'>");

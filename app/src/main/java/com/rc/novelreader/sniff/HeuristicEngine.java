@@ -98,6 +98,10 @@ public final class HeuristicEngine {
         boolean ogNovel = meta.containsKey("og:novel:book_name") || meta.containsKey("og:novel:author")
                 || String.valueOf(meta.get("og:type")).matches("(?i).*(novel|book).*");
         boolean novelWords = ogNovel || NOVEL_WORDS.matcher(docTitle).find();
+        // A list whose titles do not look like chapters is only told from a list of books (a category, a
+        // ranking, "newly added" in id order) by where it leads: a book's chapters lie under the book's own
+        // address or carry its id or name.
+        if (toc != null && toc.weak && !ogNovel && !ownLinks(url, toc.links)) toc = null;
 
         // ---- chapter evidence
         int cs = 0;
@@ -858,6 +862,53 @@ public final class HeuristicEngine {
             }
         }
         return best;
+    }
+
+    private static final Pattern ROOT_PAGE = Pattern.compile("/?(?:(?:index|default|home)(?:\\.\\w+)?)?", Pattern.CASE_INSENSITIVE);
+
+    /**
+     * Whether most of the links belong to the page they are on: they lie in the page's own folder, or their
+     * address contains the page's last name or number ("/info/88.html" and "/read/88/3.html",
+     * "book.php?id=88" and "read.php?id=88&cid=3"). The front page of a site has no such name and passes.
+     */
+    static boolean ownLinks(String pageUrl, List<Link> links) {
+        String path = Urls.path(pageUrl);
+        if (ROOT_PAGE.matcher(path).matches()) return true;
+        int cut = path.lastIndexOf('/');
+        // "/novel/name" and "/novel/name/" are the same page: its folder is itself
+        String last = path.endsWith("/") ? "" : path.substring(cut + 1);
+        String folder = last.isEmpty() || !last.contains(".") ? (path.endsWith("/") ? path : path + "/") : path.substring(0, cut + 1);
+        List<String> names = new ArrayList<>();
+        String name = last.isEmpty() ? "" : last.replaceAll("\\.\\w+$", "");
+        if (name.isEmpty()) {
+            String p = path.substring(0, path.length() - 1);
+            name = p.substring(p.lastIndexOf('/') + 1);
+        }
+        if (name.length() >= 2 || name.matches("\\d")) names.add(name);
+        int q = pageUrl.indexOf('?');
+        if (q >= 0) {
+            for (String kv : Urls.stripFragment(pageUrl).substring(q + 1).split("&")) {
+                int eq = kv.indexOf('=');
+                if (eq >= 0 && kv.length() - eq - 1 >= 1) names.add(kv.substring(eq + 1));
+            }
+        }
+        int own = 0;
+        for (Link l : links) {
+            String lp = Urls.path(l.url);
+            int lq = l.url.indexOf('?');
+            String whole = lp + (lq >= 0 ? Urls.stripFragment(l.url).substring(lq) : "");
+            boolean mine = folder.length() > 1 && lp.startsWith(folder);
+            for (int i = 0; !mine && i < names.size(); i++) {
+                String n = names.get(i);
+                for (int at = whole.indexOf(n); at >= 0 && !mine; at = whole.indexOf(n, at + 1)) {
+                    boolean left = at == 0 || !Character.isLetterOrDigit(whole.charAt(at - 1));
+                    boolean right = at + n.length() >= whole.length() || !Character.isLetterOrDigit(whole.charAt(at + n.length()));
+                    mine = left && right;
+                }
+            }
+            if (mine) own++;
+        }
+        return own >= links.size() * 0.7;
     }
 
     private void addLink(List<Link> out, Element a, String pageUrl) {

@@ -11,6 +11,9 @@ them into a native reading experience with a bookshelf and whole-book caching.
 - Package `com.rc.novelreader`, min SDK 23, target SDK 34, plain Java + framework views.
 - **Updates** - on start the app asks GitHub (at most once a day, can be switched off) whether a newer release
   exists and offers it: update (downloads and installs the release's package), cancel, or skip this version.
+- **Tests** - JVM unit tests for the engine, on-device tests against a novel site served inside the test
+  (`sh tools/devtest.sh`), and a smoke run under hard conditions with leak detection (`python tools/smoke.py`).
+  Debug builds carry [LeakCanary](https://square.github.io/leakcanary/); release builds do not.
 - Dependencies: [jsoup](https://jsoup.org) (HTML parsing for the sniffing engine) and
   [ZXing core](https://github.com/zxing/zxing) (reading QR codes; Apache 2.0).
 - UI languages: English and Simplified Chinese.
