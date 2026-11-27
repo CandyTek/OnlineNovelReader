@@ -1,0 +1,9 @@
+Novel Sniffer is an Android browser with a built-in reader for web novels. Open a novel page and switch to reading mode to extract the chapter text, remove ads and page clutter, and follow links between chapters.
+
+• Save books to your bookshelf, resume where you left off, and cache chapters or whole books for offline reading.
+• Customize fonts, text size, spacing, and themes. Choose page turns or continuous scrolling, and use night mode or text-to-speech.
+• Bookmark your place, highlight passages, take notes, and search cached chapters.
+• Browse with tabs and ad blocking, or import TXT and EPUB files from your device.
+• Back up your bookshelf, reading progress, and settings to a local file or WebDAV.
+
+The interface is available in English and Simplified Chinese.

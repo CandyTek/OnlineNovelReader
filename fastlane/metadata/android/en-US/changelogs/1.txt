@@ -1,0 +1,1 @@
+Initial release with automatic novel detection, a customizable reading mode, and a bookshelf with offline chapter caching.
